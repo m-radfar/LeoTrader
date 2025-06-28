@@ -3312,7 +3312,8 @@ void ModifyTP(int cmd, MyOrder& TargetOrder)
 
 //                 // Optional: Fortschritt ausgeben
 //                 if (epoch % 100 == 0) {
-//                     Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
+//                     Print("Epoch:
+//  ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
 //                 }
 //             }
 
