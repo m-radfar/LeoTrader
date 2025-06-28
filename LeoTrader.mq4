@@ -2740,590 +2740,590 @@ void ModifyTP(int cmd, MyOrder& TargetOrder)
 
 
 
-// class Neuron {
-//     private:
-//         double weights[];  // Gewichte des Neurons
-//         double bias;       // Bias-Wert
-
-//         // Aktivierungsfunktion (Sigmoid)
-//         double activate(double x) {
-//             return 1 / (1 + MathExp(-x));
-//         }
-
-//     public:
-//         // Konstruktor: Initialisierung
-//         Neuron(int numInputs) {
-//             ArrayResize(weights, numInputs);
-//             for (int i = 0; i < numInputs; i++) {
-//                 weights[i] = MathRand() * 0.01; // Zufällige Gewichte
-//             }
-//             bias = MathRand() * 0.01; // Zufälliger Bias
-//         }
-
-//         // Berechnung des Outputs
-//         double predict(const double &inputs[]) {
-//             double sum = 0;
-//             for (int i = 0; i < ArraySize(inputs); i++) {
-//                 sum += inputs[i] * weights[i];
-//             }
-//             sum += bias; // Bias hinzufügen
-//             return activate(sum);
-//         }
-
-//         // Zugriff auf die Gewichte und den Bias
-//         double getWeight(int i) { return weights[i]; }
-//         double getBias() { return bias; }
-//         void setWeight(int i, double value) { weights[i] = value; }
-//         void setBias(double value) { bias = value; }
-//         int getNumWeights() { return ArraySize(weights); }
-// };
-
-// class Optimizer {
-//     private:
-//         string optimizationType;  // Typ des Optimierungsalgorithmus
-//         double learningRate;      // Lernrate
-//         double beta1;             // Adam/Momentum Parameter
-//         double beta2;             // Adam Parameter
-//         double epsilon;           // Stabilitätskonstante
-//         double m[];               // Momentum-Cache
-//         double v[];               // RMSProp-Cache
-//         double mBias;             // Momentum-Cache für Bias
-//         double vBias;             // RMSProp-Cache für Bias
-//         int t;                    // Iterationszähler
-
-//     public:
-//         Optimizer(double lr, string optType = "SGD", double b1 = 0.9, double b2 = 0.999, double eps = 1e-8) {
-//             learningRate = lr;
-//             optimizationType = optType;
-//             beta1 = b1;
-//             beta2 = b2;
-//             epsilon = eps;
-//             mBias = 0.0;
-//             vBias = 0.0;
-//             t = 0;
-//         }
-
-//         void applyGradients(Neuron &neuron, const double &inputs[], double error) {
-//             int numWeights = neuron.getNumWeights();
-
-//             // Initialisiere Cache-Arrays
-//             if (ArraySize(m) != numWeights) {
-//                 ArrayResize(m, numWeights);
-//                 ArrayResize(v, numWeights);
-//                 ArrayInitialize(m, 0.0);
-//                 ArrayInitialize(v, 0.0);
-//             }
-
-//             t++;
-
-//             Print("numWeights: ",numWeights);
-//             for (int i = 0; i < numWeights; i++) {
-//                 Print("i: ",i);
-//                 double grad = error * inputs[i];
-//                 if (optimizationType == "Adam") {
-//                     m[i] = beta1 * m[i] + (1 - beta1) * grad;
-//                     v[i] = beta2 * v[i] + (1 - beta2) * grad * grad;
-
-//                     double mHat = m[i] / (1 - MathPow(beta1, t));
-//                     double vHat = v[i] / (1 - MathPow(beta2, t));
-
-//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * mHat / (MathSqrt(vHat) + epsilon));
-//                 } else if (optimizationType == "Momentum") {
-//                     m[i] = beta1 * m[i] + grad;
-//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * m[i]);
-//                 } else {
-//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * grad);
-//                 }
-//             }
-
-//             double gradBias = error;
-//             if (optimizationType == "Adam") {
-//                 mBias = beta1 * mBias + (1 - beta1) * gradBias;
-//                 vBias = beta2 * vBias + (1 - beta2) * gradBias * gradBias;
-
-//                 double mHatBias = mBias / (1 - MathPow(beta1, t));
-//                 double vHatBias = vBias / (1 - MathPow(beta2, t));
-
-//                 neuron.setBias(neuron.getBias() - learningRate * mHatBias / (MathSqrt(vHatBias) + epsilon));
-//             } else if (optimizationType == "Momentum") {
-//                 mBias = beta1 * mBias + gradBias;
-//                 neuron.setBias(neuron.getBias() - learningRate * mBias);
-//             } else {
-//                 neuron.setBias(neuron.getBias() - learningRate * gradBias);
-//             }
-//         }
-// };
-
-// class Loss {
-//     private:
-//         string lossType;
-
-//     public:
-//         Loss(string type = "MSE") {
-//             lossType = type;
-//         }
-
-//         double calculateLoss(double target, double output) {
-//             if (lossType == "MSE") {
-//                 return MathPow(target - output, 2);
-//             } else if (lossType == "MAE") {
-//                 return MathAbs(target - output);
-//             } else {
-//                 Print("Unbekannter Verlusttyp: ", lossType);
-//                 return 0.0;
-//             }
-//         }
-
-//         double calculateGradient(double target, double output) {
-//             if (lossType == "MSE") {
-//                 return -2 * (target - output);
-//             } else if (lossType == "MAE") {
-//                 return (target > output) ? -1 : 1;
-//             } else {
-//                 Print("Unbekannter Verlusttyp: ", lossType);
-//                 return 0.0;
-//             }
-//         }
-// };
-
-// class Layer {
-//     private:
-//         Neuron *neurons[];  // Array von Zeigern auf Neuronen
-
-//     public:
-//         // Konstruktor: Initialisiert die Schicht mit einer bestimmten Anzahl von Neuronen
-//         void init(int numNeurons, int numInputsPerNeuron) {
-//             ArrayResize(neurons, numNeurons);
-//             for (int i = 0; i < numNeurons; i++) {
-//                 neurons[i] = new Neuron(numInputsPerNeuron); // Neuron initialisieren
-//             }
-//         }
-
-//         // Berechnet die Ausgaben der Schicht basierend auf den Eingaben
-//         void forward(double &inputs[], double &outputs[]) {
-//             ArrayResize(outputs, ArraySize(neurons));
-//             for (int i = 0; i < ArraySize(neurons); i++) {
-//                 outputs[i] = neurons[i].predict(inputs);
-//             }
-//         }
-
-//         // Zugriff auf Neuronen
-//         Neuron *getNeuron(int index) {
-//             if (index >= 0 && index < ArraySize(neurons)) {
-//                 return neurons[index];
-//             }
-//             return NULL;
-//         }
-
-//         int getNumNeurons() {
-//             return ArraySize(neurons);
-//         }
-
-//         // Zerstörer: Löscht alle Neuronen in der Schicht
-//         ~Layer() {
-//             for (int i = 0; i < ArraySize(neurons); i++) {
-//                 delete neurons[i];
-//             }
-//         }
-// };
-
-
-// class SequentialModel {
-//     private:
-//         Layer *layers[];          // Array von Zeigern auf Layer
-//         Optimizer *optimizer;     // Zeiger auf den Optimierungsalgorithmus
-//         Loss *lossFunction;       // Zeiger auf die Verlustfunktion
-
-//     public:
-//         // Konstruktor: Initialisiert das Modell
-//         void init(Optimizer &opt, Loss &loss) {
-//             optimizer = &opt;      // Optimierer zuweisen
-//             lossFunction = &loss; // Verlustfunktion zuweisen
-//         }
-
-//         // Fügt eine Schicht zum Modell hinzu
-//         void addLayer(int numNeurons, int numInputsPerNeuron = 0) {
-//             Layer *newLayer = new Layer;
-//             int numInputs = (ArraySize(layers) > 0) ? layers[ArraySize(layers) - 1].getNumNeurons() : numInputsPerNeuron;
-//             newLayer.init(numNeurons, numInputs);
-//             ArrayResize(layers, ArraySize(layers) + 1);
-//             layers[ArraySize(layers) - 1] = newLayer;
-//         }
-
-//         // Führt einen Vorwärtsdurchlauf durch
-//         // void predict(double &inputs[], double &outputs[]) {
-//         //     double tempInputs[];
-//         //     double tempOutputs[];
-//         //     ArrayCopy(tempInputs, inputs);
-
-//         //     for (int i = 0; i < ArraySize(layers); i++) {
-//         //         layers[i].forward(tempInputs, tempOutputs);
-//         //         ArrayCopy(tempInputs, tempOutputs); // Übertrag der Ausgaben als Eingaben für die nächste Schicht
-//         //     }
-
-//         //     ArrayResize(outputs, ArraySize(tempOutputs));
-//         //     ArrayCopy(outputs, tempOutputs);
-//         // }
-
-//         void predict(double &inputs[], double &outputs[]) {
-//             double tempInputs[];
-//             double tempOutputs[];
-//             ArrayCopy(tempInputs, inputs); // Eingaben kopieren
-
-//             for (int i = 0; i < ArraySize(layers); i++) {
-//                 layers[i].forward(tempInputs, tempOutputs); // Vorwärtsdurchlauf
-//                 ArrayResize(tempInputs, ArraySize(tempOutputs));
-//                 ArrayCopy(tempInputs, tempOutputs); // Ausgaben als Eingaben weitergeben
-//             }
-
-//             ArrayResize(outputs, ArraySize(tempOutputs));
-//             ArrayCopy(outputs, tempOutputs); // Finale Ausgaben kopieren
-//         }
-
-//         // Trainingsmethode
-//         void train(double &inputs[], double target, int epochs) {
-//             double outputs[];
-
-//             for (int epoch = 0; epoch < epochs; epoch++) {
-//                 // Vorhersage
-//                 predict(inputs, outputs);
-
-//                 // Verlust und Fehler berechnen
-//                 double lossValue = lossFunction.calculateLoss(target, outputs[0]);
-//                 double error = lossFunction.calculateGradient(target, outputs[0]);
-
-//                 // Backpropagation durch alle Schichten
-//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
-//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
-//                         Neuron *neuron = layers[i].getNeuron(j);
-//                         optimizer.applyGradients(*neuron, inputs, error);
-//                     }
-//                 }
-
-//                 // Ausgabe für Monitoring
-//                 if (epoch % 100 == 0) {
-//                     Print("Epoch: ", epoch, ", Loss: ", lossValue);
-//                 }
-//             }
-//         }
-
-//         // Trainingsmethode mit Early Stopping
-//         void trainWithEarlyStopping(
-//             double &inputs[],
-//             double target,
-//             double tolerance,
-//             int maxEpochs,
-//             int minTolPassCont2Stop
-//         ) {
-//             double outputs[];       // Vorhersage-Ausgaben
-//             int epoch = 0;          // Epochenzähler
-//             int cntTolPass = 0;     // Toleranzpass-Zähler
-//             double error = 0;       // Fehlerwert
-//             double lossValue = 0;   // Verlustwert
-
-//             while (epoch < maxEpochs) {
-//                 // Vorhersage
-//                 predict(inputs, outputs);
-
-//                 // Verlust und Fehler berechnen
-//                 lossValue = lossFunction.calculateLoss(target, outputs[0]);
-//                 error = lossFunction.calculateGradient(target, outputs[0]);
-
-//                 // Backpropagation durch alle Schichten
-//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
-//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
-//                         Neuron *neuron = layers[i].getNeuron(j);
-//                         optimizer.applyGradients(*neuron, inputs, error);
-//                     }
-//                 }
-
-//                 // Epochenzähler erhöhen
-//                 epoch++;
-
-//                 // Überprüfen, ob der Fehler innerhalb der Toleranz liegt
-//                 if (MathAbs(error) <= tolerance) {
-//                     cntTolPass++;
-//                 } else {
-//                     cntTolPass = 0; // Zurücksetzen, wenn Fehler außerhalb der Toleranz liegt
-//                 }
-
-//                 // Wenn die Bedingung für kontinuierliche Toleranz erfüllt ist, abbrechen
-//                 if (cntTolPass >= minTolPassCont2Stop) {
-//                     Print("Frühes Stoppen nach ", epoch, " Epochen. Verlust: ", lossValue, ", Fehler: ", error);
-//                     break;
-//                 }
-
-//                 // Optional: Fortschritt ausgeben
-//                 if (epoch % 100 == 0) {
-//                     Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
-//                 }
-//             }
-
-//             // Abschlussausgabe
-//             Print("Training abgeschlossen nach ", epoch, " Epochen mit Verlust: ", lossValue, ", Fehler: ", error);
-//         }
-
-//         // Zerstörer: Löscht alle Layer im Modell
-//         ~SequentialModel() {
-//             for (int i = 0; i < ArraySize(layers); i++) {
-//                 delete layers[i];
-//             }
-//         }
-// };
-
-// class FunctionalModel {
-//     private:
-//         Layer *layers[];   // Array von Layer-Zeigern
-//         string connections[]; // Verbindungen der Schichten, z. B. "Layer1 -> Layer2"
-//         int inputSize;     // Eingabedimension
-//         int outputSize;    // Ausgabedimension
-
-//     public:
-//         // Konstruktor: Initialisiert ein funktionales Modell
-//         FunctionalModel(int inputDim) {
-//             inputSize = inputDim;
-//             outputSize = 0; // Wird später beim Hinzufügen der Schichten definiert
-//         }
-
-//         // Fügt eine neue Schicht hinzu
-//         void addLayer(Layer &layer, int outputDim) {
-//             ArrayResize(layers, ArraySize(layers) + 1);
-//             layers[ArraySize(layers) - 1] = &layer;
-//             outputSize = outputDim; // Setzt die Ausgabedimension basierend auf der letzten Schicht
-//         }
-
-//         // Verbindet zwei Schichten
-//         void connectLayers(string from, string to) {
-//             ArrayResize(connections, ArraySize(connections) + 1);
-//             connections[ArraySize(connections) - 1] = from + " -> " + to;
-//         }
-
-//         // Führt einen Forward-Pass durch
-//         void forward(double &inputs[], double &outputs[]) {
-//             double currentInputs[];
-//             ArrayCopy(currentInputs, inputs);
-
-//             for (int i = 0; i < ArraySize(layers); i++) {
-//                 double tempOutputs[];
-//                 layers[i].forward(currentInputs, tempOutputs);
-//                 ArrayCopy(currentInputs, tempOutputs); // Ausgaben der aktuellen Schicht sind Eingaben der nächsten Schicht
-//             }
-
-//             ArrayResize(outputs, ArraySize(currentInputs));
-//             ArrayCopy(outputs, currentInputs);
-//         }
-
-//         // Trainingsmethode
-//         void train(double &inputs[], double target, Optimizer &optimizer, Loss &loss, int epochs) {
-//             for (int epoch = 0; epoch < epochs; epoch++) {
-//                 double outputs[];
-//                 forward(inputs, outputs);
-
-//                 // Verlust und Fehler berechnen
-//                 double lossValue = loss.calculateLoss(target, outputs[0]);
-//                 double error = loss.calculateGradient(target, outputs[0]);
-
-//                 // Backpropagation durch alle Schichten
-//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
-//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
-//                         Neuron *neuron = layers[i].getNeuron(j);
-//                         optimizer.applyGradients(*neuron, inputs, error);
-//                     }
-//                 }
-
-//                 // Ausgabe für Fortschritt
-//                 if (epoch % 100 == 0) {
-//                     Print("Epoch: ", epoch, ", Loss: ", lossValue);
-//                 }
-//             }
-//         }
-
-//         // Zeigt die Verbindungen zwischen den Schichten
-//         void printConnections() {
-//             for (int i = 0; i < ArraySize(connections); i++) {
-//                 Print(connections[i]);
-//             }
-//         }
-// };
-
-
-// class Modelauto {
-//     private:
-//         Layer *layers[];          // Array von Zeigern auf Layer
-//         Optimizer *optimizer;     // Zeiger auf den Optimierungsalgorithmus
-//         Loss *lossFunction;       // Zeiger auf die Verlustfunktion
-//         int inputSize;            // Größe der Eingabeschicht
-//         int outputSize;           // Größe der Ausgabeschicht
-
-//     public:
-//         // Konstruktor: Initialisiert das Modell
-//         void init(Optimizer &opt, Loss &loss) {
-//             optimizer = &opt;      // Optimierer zuweisen
-//             lossFunction = &loss; // Verlustfunktion zuweisen
-//             inputSize = 0;         // Standardmäßig keine Eingabeschicht
-//             outputSize = 0;        // Standardmäßig keine Ausgabeschicht
-//         }
-
-//         // Automatische Initialisierung der Eingabegröße
-//         void setInputSize(int size) {
-//             inputSize = size;
-//         }
-
-//         // Automatische Initialisierung der Ausgabegröße
-//         void setOutputSize(int size) {
-//             outputSize = size;
-//         }
-
-//         // Fügt eine Schicht zum Modell hinzu
-//         void addLayer(int numNeurons, int numInputsPerNeuron = 0) {
-//             Layer *newLayer = new Layer;
-//             int numInputs = (ArraySize(layers) > 0) ? layers[ArraySize(layers) - 1].getNumNeurons() : inputSize;
-//             newLayer.init(numNeurons, numInputs);
-//             ArrayResize(layers, ArraySize(layers) + 1);
-//             layers[ArraySize(layers) - 1] = newLayer;
-//         }
-
-//         // Führt einen Vorwärtsdurchlauf durch
-//         void predict(double &inputs[], double &outputs[]) {
-//             if (ArraySize(layers) == 0) {
-//                 Print("Keine Schichten im Modell definiert!");
-//                 return;
-//             }
-
-//             double tempInputs[];
-//             double tempOutputs[];
-//             ArrayCopy(tempInputs, inputs);
-
-//             for (int i = 0; i < ArraySize(layers); i++) {
-//                 layers[i].forward(tempInputs, tempOutputs);
-//                 ArrayCopy(tempInputs, tempOutputs); // Übertrag der Ausgaben als Eingaben für die nächste Schicht
-//             }
-
-//             ArrayResize(outputs, ArraySize(tempOutputs));
-//             ArrayCopy(outputs, tempOutputs);
-//         }
-
-//         // Automatische Erstellung von Eingabe- und Ausgabeschichten
-//         void buildAuto(double &inputs[], double &targets[]) {
-//             if (inputSize == 0) {
-//                 inputSize = ArraySize(inputs);
-//             }
-//             if (outputSize == 0) {
-//                 outputSize = ArraySize(targets);
-//             }
-
-//             // Eingabeschicht erstellen
-//             if (ArraySize(layers) == 0) {
-//                 addLayer(inputSize, 0); // Die Eingabeschicht mit der Größe der Eingabedaten
-//             }
-
-//             // Sicherstellen, dass die letzte Schicht die Ausgabeschicht ist
-//             if (ArraySize(layers) > 0 && layers[ArraySize(layers) - 1].getNumNeurons() != outputSize) {
-//                 addLayer(outputSize, layers[ArraySize(layers) - 1].getNumNeurons());
-//             }
-
-//             Print("Modell automatisch erstellt: Eingabegröße: ", inputSize, ", Ausgabegröße: ", outputSize);
-//         }
-
-//         // Trainingsmethode
-//         void train(double &inputs[], double &targets[], int epochs) {
-//             if (ArraySize(layers) == 0) {
-//                 Print("Keine Schichten im Modell definiert!");
-//                 return;
-//             }
-
-//             if (outputSize != ArraySize(targets)) {
-//                 Print("Fehler: Die Ausgabeschichtgröße stimmt nicht mit der Zielgröße überein!");
-//                 return;
-//             }
-
-//             double outputs[];
-
-//             for (int epoch = 0; epoch < epochs; epoch++) {
-//                 // Vorhersage
-//                 predict(inputs, outputs);
-
-//                 for (int i = 0; i < outputSize; i++) {
-//                     // Verlust und Fehler berechnen
-//                     double lossValue = lossFunction.calculateLoss(targets[i], outputs[i]);
-//                     double error = lossFunction.calculateGradient(targets[i], outputs[i]);
-
-//                     // Backpropagation durch alle Schichten
-//                     for (int j = ArraySize(layers) - 1; j >= 0; j--) {
-//                         for (int k = 0; k < layers[j].getNumNeurons(); k++) {
-//                             Neuron *neuron = layers[j].getNeuron(k);
-//                             optimizer.applyGradients(*neuron, inputs, error);
-//                         }
-//                     }
-
-//                     // Ausgabe für Monitoring
-//                     if (epoch % 100 == 0 && i == 0) {
-//                         Print("Epoch: ", epoch, ", Loss: ", lossValue);
-//                     }
-//                 }
-//             }
-//         }
-
-//         // Trainingsmethode mit Early Stopping
-//         void trainWithEarlyStopping(
-//             double &inputs[],
-//             double target,
-//             double tolerance,
-//             int maxEpochs,
-//             int minTolPassCont2Stop
-//         ) {
-//             double outputs[];       // Vorhersage-Ausgaben
-//             int epoch = 0;          // Epochenzähler
-//             int cntTolPass = 0;     // Toleranzpass-Zähler
-//             double error = 0;       // Fehlerwert
-//             double lossValue = 0;   // Verlustwert
-
-//             while (epoch < maxEpochs) {
-//                 // Vorhersage
-//                 predict(inputs, outputs);
-
-//                 // Verlust und Fehler berechnen
-//                 lossValue = lossFunction.calculateLoss(target, outputs[0]);
-//                 error = lossFunction.calculateGradient(target, outputs[0]);
-
-//                 // Backpropagation durch alle Schichten
-//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
-//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
-//                         Neuron *neuron = layers[i].getNeuron(j);
-//                         optimizer.applyGradients(*neuron, inputs, error);
-//                     }
-//                 }
-
-//                 // Epochenzähler erhöhen
-//                 epoch++;
-
-//                 // Überprüfen, ob der Fehler innerhalb der Toleranz liegt
-//                 if (MathAbs(error) <= tolerance) {
-//                     cntTolPass++;
-//                 } else {
-//                     cntTolPass = 0; // Zurücksetzen, wenn Fehler außerhalb der Toleranz liegt
-//                 }
-
-//                 // Wenn die Bedingung für kontinuierliche Toleranz erfüllt ist, abbrechen
-//                 if (cntTolPass >= minTolPassCont2Stop) {
-//                     Print("Frühes Stoppen nach ", epoch, " Epochen. Verlust: ", lossValue, ", Fehler: ", error);
-//                     break;
-//                 }
-
-//                 // Optional: Fortschritt ausgeben
-//                 if (epoch % 100 == 0) {
-//                     Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
-//                 }
-//             }
-
-//             // Abschlussausgabe
-//             Print("Training abgeschlossen nach ", epoch, " Epochen mit Verlust: ", lossValue, ", Fehler: ", error);
-//         }
-
-//         // Zerstörer: Löscht alle Layer im Modell
-//         ~Modelauto() {
-//             for (int i = 0; i < ArraySize(layers); i++) {
-//                 delete layers[i];
-//             }
-//         }
-// };
+class Neuron {
+    private:
+        double weights[];  // Gewichte des Neurons
+        double bias;       // Bias-Wert
+
+        // Aktivierungsfunktion (Sigmoid)
+        double activate(double x) {
+            return 1 / (1 + MathExp(-x));
+        }
+
+    public:
+        // Konstruktor: Initialisierung
+        Neuron(int numInputs) {
+            ArrayResize(weights, numInputs);
+            for (int i = 0; i < numInputs; i++) {
+                weights[i] = MathRand() * 0.01; // Zufällige Gewichte
+            }
+            bias = MathRand() * 0.01; // Zufälliger Bias
+        }
+
+        // Berechnung des Outputs
+        double predict(const double &inputs[]) {
+            double sum = 0;
+            for (int i = 0; i < ArraySize(inputs); i++) {
+                sum += inputs[i] * weights[i];
+            }
+            sum += bias; // Bias hinzufügen
+            return activate(sum);
+        }
+
+        // Zugriff auf die Gewichte und den Bias
+        double getWeight(int i) { return weights[i]; }
+        double getBias() { return bias; }
+        void setWeight(int i, double value) { weights[i] = value; }
+        void setBias(double value) { bias = value; }
+        int getNumWeights() { return ArraySize(weights); }
+};
+
+class Optimizer {
+    private:
+        string optimizationType;  // Typ des Optimierungsalgorithmus
+        double learningRate;      // Lernrate
+        double beta1;             // Adam/Momentum Parameter
+        double beta2;             // Adam Parameter
+        double epsilon;           // Stabilitätskonstante
+        double m[];               // Momentum-Cache
+        double v[];               // RMSProp-Cache
+        double mBias;             // Momentum-Cache für Bias
+        double vBias;             // RMSProp-Cache für Bias
+        int t;                    // Iterationszähler
+
+    public:
+        Optimizer(double lr, string optType = "SGD", double b1 = 0.9, double b2 = 0.999, double eps = 1e-8) {
+            learningRate = lr;
+            optimizationType = optType;
+            beta1 = b1;
+            beta2 = b2;
+            epsilon = eps;
+            mBias = 0.0;
+            vBias = 0.0;
+            t = 0;
+        }
+
+        void applyGradients(Neuron &neuron, const double &inputs[], double error) {
+            int numWeights = neuron.getNumWeights();
+
+            // Initialisiere Cache-Arrays
+            if (ArraySize(m) != numWeights) {
+                ArrayResize(m, numWeights);
+                ArrayResize(v, numWeights);
+                ArrayInitialize(m, 0.0);
+                ArrayInitialize(v, 0.0);
+            }
+
+            t++;
+
+            Print("numWeights: ",numWeights);
+            for (int i = 0; i < numWeights; i++) {
+                Print("i: ",i);
+                double grad = error * inputs[i];
+                if (optimizationType == "Adam") {
+                    m[i] = beta1 * m[i] + (1 - beta1) * grad;
+                    v[i] = beta2 * v[i] + (1 - beta2) * grad * grad;
+
+                    double mHat = m[i] / (1 - MathPow(beta1, t));
+                    double vHat = v[i] / (1 - MathPow(beta2, t));
+
+                    neuron.setWeight(i, neuron.getWeight(i) - learningRate * mHat / (MathSqrt(vHat) + epsilon));
+                } else if (optimizationType == "Momentum") {
+                    m[i] = beta1 * m[i] + grad;
+                    neuron.setWeight(i, neuron.getWeight(i) - learningRate * m[i]);
+                } else {
+                    neuron.setWeight(i, neuron.getWeight(i) - learningRate * grad);
+                }
+            }
+
+            double gradBias = error;
+            if (optimizationType == "Adam") {
+                mBias = beta1 * mBias + (1 - beta1) * gradBias;
+                vBias = beta2 * vBias + (1 - beta2) * gradBias * gradBias;
+
+                double mHatBias = mBias / (1 - MathPow(beta1, t));
+                double vHatBias = vBias / (1 - MathPow(beta2, t));
+
+                neuron.setBias(neuron.getBias() - learningRate * mHatBias / (MathSqrt(vHatBias) + epsilon));
+            } else if (optimizationType == "Momentum") {
+                mBias = beta1 * mBias + gradBias;
+                neuron.setBias(neuron.getBias() - learningRate * mBias);
+            } else {
+                neuron.setBias(neuron.getBias() - learningRate * gradBias);
+            }
+        }
+};
+
+class Loss {
+    private:
+        string lossType;
+
+    public:
+        Loss(string type = "MSE") {
+            lossType = type;
+        }
+
+        double calculateLoss(double target, double output) {
+            if (lossType == "MSE") {
+                return MathPow(target - output, 2);
+            } else if (lossType == "MAE") {
+                return MathAbs(target - output);
+            } else {
+                Print("Unbekannter Verlusttyp: ", lossType);
+                return 0.0;
+            }
+        }
+
+        double calculateGradient(double target, double output) {
+            if (lossType == "MSE") {
+                return -2 * (target - output);
+            } else if (lossType == "MAE") {
+                return (target > output) ? -1 : 1;
+            } else {
+                Print("Unbekannter Verlusttyp: ", lossType);
+                return 0.0;
+            }
+        }
+};
+
+class Layer {
+    private:
+        Neuron *neurons[];  // Array von Zeigern auf Neuronen
+
+    public:
+        // Konstruktor: Initialisiert die Schicht mit einer bestimmten Anzahl von Neuronen
+        void init(int numNeurons, int numInputsPerNeuron) {
+            ArrayResize(neurons, numNeurons);
+            for (int i = 0; i < numNeurons; i++) {
+                neurons[i] = new Neuron(numInputsPerNeuron); // Neuron initialisieren
+            }
+        }
+
+        // Berechnet die Ausgaben der Schicht basierend auf den Eingaben
+        void forward(double &inputs[], double &outputs[]) {
+            ArrayResize(outputs, ArraySize(neurons));
+            for (int i = 0; i < ArraySize(neurons); i++) {
+                outputs[i] = neurons[i].predict(inputs);
+            }
+        }
+
+        // Zugriff auf Neuronen
+        Neuron *getNeuron(int index) {
+            if (index >= 0 && index < ArraySize(neurons)) {
+                return neurons[index];
+            }
+            return NULL;
+        }
+
+        int getNumNeurons() {
+            return ArraySize(neurons);
+        }
+
+        // Zerstörer: Löscht alle Neuronen in der Schicht
+        ~Layer() {
+            for (int i = 0; i < ArraySize(neurons); i++) {
+                delete neurons[i];
+            }
+        }
+};
+
+
+class SequentialModel {
+    private:
+        Layer *layers[];          // Array von Zeigern auf Layer
+        Optimizer *optimizer;     // Zeiger auf den Optimierungsalgorithmus
+        Loss *lossFunction;       // Zeiger auf die Verlustfunktion
+
+    public:
+        // Konstruktor: Initialisiert das Modell
+        void init(Optimizer &opt, Loss &loss) {
+            optimizer = &opt;      // Optimierer zuweisen
+            lossFunction = &loss; // Verlustfunktion zuweisen
+        }
+
+        // Fügt eine Schicht zum Modell hinzu
+        void addLayer(int numNeurons, int numInputsPerNeuron = 0) {
+            Layer *newLayer = new Layer;
+            int numInputs = (ArraySize(layers) > 0) ? layers[ArraySize(layers) - 1].getNumNeurons() : numInputsPerNeuron;
+            newLayer.init(numNeurons, numInputs);
+            ArrayResize(layers, ArraySize(layers) + 1);
+            layers[ArraySize(layers) - 1] = newLayer;
+        }
+
+        // Führt einen Vorwärtsdurchlauf durch
+        // void predict(double &inputs[], double &outputs[]) {
+        //     double tempInputs[];
+        //     double tempOutputs[];
+        //     ArrayCopy(tempInputs, inputs);
+
+        //     for (int i = 0; i < ArraySize(layers); i++) {
+        //         layers[i].forward(tempInputs, tempOutputs);
+        //         ArrayCopy(tempInputs, tempOutputs); // Übertrag der Ausgaben als Eingaben für die nächste Schicht
+        //     }
+
+        //     ArrayResize(outputs, ArraySize(tempOutputs));
+        //     ArrayCopy(outputs, tempOutputs);
+        // }
+
+        void predict(double &inputs[], double &outputs[]) {
+            double tempInputs[];
+            double tempOutputs[];
+            ArrayCopy(tempInputs, inputs); // Eingaben kopieren
+
+            for (int i = 0; i < ArraySize(layers); i++) {
+                layers[i].forward(tempInputs, tempOutputs); // Vorwärtsdurchlauf
+                ArrayResize(tempInputs, ArraySize(tempOutputs));
+                ArrayCopy(tempInputs, tempOutputs); // Ausgaben als Eingaben weitergeben
+            }
+
+            ArrayResize(outputs, ArraySize(tempOutputs));
+            ArrayCopy(outputs, tempOutputs); // Finale Ausgaben kopieren
+        }
+
+        // Trainingsmethode
+        void train(double &inputs[], double target, int epochs) {
+            double outputs[];
+
+            for (int epoch = 0; epoch < epochs; epoch++) {
+                // Vorhersage
+                predict(inputs, outputs);
+
+                // Verlust und Fehler berechnen
+                double lossValue = lossFunction.calculateLoss(target, outputs[0]);
+                double error = lossFunction.calculateGradient(target, outputs[0]);
+
+                // Backpropagation durch alle Schichten
+                for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+                    for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+                        Neuron *neuron = layers[i].getNeuron(j);
+                        optimizer.applyGradients(*neuron, inputs, error);
+                    }
+                }
+
+                // Ausgabe für Monitoring
+                if (epoch % 100 == 0) {
+                    Print("Epoch: ", epoch, ", Loss: ", lossValue);
+                }
+            }
+        }
+
+        // Trainingsmethode mit Early Stopping
+        void trainWithEarlyStopping(
+            double &inputs[],
+            double target,
+            double tolerance,
+            int maxEpochs,
+            int minTolPassCont2Stop
+        ) {
+            double outputs[];       // Vorhersage-Ausgaben
+            int epoch = 0;          // Epochenzähler
+            int cntTolPass = 0;     // Toleranzpass-Zähler
+            double error = 0;       // Fehlerwert
+            double lossValue = 0;   // Verlustwert
+
+            while (epoch < maxEpochs) {
+                // Vorhersage
+                predict(inputs, outputs);
+
+                // Verlust und Fehler berechnen
+                lossValue = lossFunction.calculateLoss(target, outputs[0]);
+                error = lossFunction.calculateGradient(target, outputs[0]);
+
+                // Backpropagation durch alle Schichten
+                for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+                    for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+                        Neuron *neuron = layers[i].getNeuron(j);
+                        optimizer.applyGradients(*neuron, inputs, error);
+                    }
+                }
+
+                // Epochenzähler erhöhen
+                epoch++;
+
+                // Überprüfen, ob der Fehler innerhalb der Toleranz liegt
+                if (MathAbs(error) <= tolerance) {
+                    cntTolPass++;
+                } else {
+                    cntTolPass = 0; // Zurücksetzen, wenn Fehler außerhalb der Toleranz liegt
+                }
+
+                // Wenn die Bedingung für kontinuierliche Toleranz erfüllt ist, abbrechen
+                if (cntTolPass >= minTolPassCont2Stop) {
+                    Print("Frühes Stoppen nach ", epoch, " Epochen. Verlust: ", lossValue, ", Fehler: ", error);
+                    break;
+                }
+
+                // Optional: Fortschritt ausgeben
+                if (epoch % 100 == 0) {
+                    Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
+                }
+            }
+
+            // Abschlussausgabe
+            Print("Training abgeschlossen nach ", epoch, " Epochen mit Verlust: ", lossValue, ", Fehler: ", error);
+        }
+
+        // Zerstörer: Löscht alle Layer im Modell
+        ~SequentialModel() {
+            for (int i = 0; i < ArraySize(layers); i++) {
+                delete layers[i];
+            }
+        }
+};
+
+class FunctionalModel {
+    private:
+        Layer *layers[];   // Array von Layer-Zeigern
+        string connections[]; // Verbindungen der Schichten, z. B. "Layer1 -> Layer2"
+        int inputSize;     // Eingabedimension
+        int outputSize;    // Ausgabedimension
+
+    public:
+        // Konstruktor: Initialisiert ein funktionales Modell
+        FunctionalModel(int inputDim) {
+            inputSize = inputDim;
+            outputSize = 0; // Wird später beim Hinzufügen der Schichten definiert
+        }
+
+        // Fügt eine neue Schicht hinzu
+        void addLayer(Layer &layer, int outputDim) {
+            ArrayResize(layers, ArraySize(layers) + 1);
+            layers[ArraySize(layers) - 1] = &layer;
+            outputSize = outputDim; // Setzt die Ausgabedimension basierend auf der letzten Schicht
+        }
+
+        // Verbindet zwei Schichten
+        void connectLayers(string from, string to) {
+            ArrayResize(connections, ArraySize(connections) + 1);
+            connections[ArraySize(connections) - 1] = from + " -> " + to;
+        }
+
+        // Führt einen Forward-Pass durch
+        void forward(double &inputs[], double &outputs[]) {
+            double currentInputs[];
+            ArrayCopy(currentInputs, inputs);
+
+            for (int i = 0; i < ArraySize(layers); i++) {
+                double tempOutputs[];
+                layers[i].forward(currentInputs, tempOutputs);
+                ArrayCopy(currentInputs, tempOutputs); // Ausgaben der aktuellen Schicht sind Eingaben der nächsten Schicht
+            }
+
+            ArrayResize(outputs, ArraySize(currentInputs));
+            ArrayCopy(outputs, currentInputs);
+        }
+
+        // Trainingsmethode
+        void train(double &inputs[], double target, Optimizer &optimizer, Loss &loss, int epochs) {
+            for (int epoch = 0; epoch < epochs; epoch++) {
+                double outputs[];
+                forward(inputs, outputs);
+
+                // Verlust und Fehler berechnen
+                double lossValue = loss.calculateLoss(target, outputs[0]);
+                double error = loss.calculateGradient(target, outputs[0]);
+
+                // Backpropagation durch alle Schichten
+                for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+                    for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+                        Neuron *neuron = layers[i].getNeuron(j);
+                        optimizer.applyGradients(*neuron, inputs, error);
+                    }
+                }
+
+                // Ausgabe für Fortschritt
+                if (epoch % 100 == 0) {
+                    Print("Epoch: ", epoch, ", Loss: ", lossValue);
+                }
+            }
+        }
+
+        // Zeigt die Verbindungen zwischen den Schichten
+        void printConnections() {
+            for (int i = 0; i < ArraySize(connections); i++) {
+                Print(connections[i]);
+            }
+        }
+};
+
+
+class Modelauto {
+    private:
+        Layer *layers[];          // Array von Zeigern auf Layer
+        Optimizer *optimizer;     // Zeiger auf den Optimierungsalgorithmus
+        Loss *lossFunction;       // Zeiger auf die Verlustfunktion
+        int inputSize;            // Größe der Eingabeschicht
+        int outputSize;           // Größe der Ausgabeschicht
+
+    public:
+        // Konstruktor: Initialisiert das Modell
+        void init(Optimizer &opt, Loss &loss) {
+            optimizer = &opt;      // Optimierer zuweisen
+            lossFunction = &loss; // Verlustfunktion zuweisen
+            inputSize = 0;         // Standardmäßig keine Eingabeschicht
+            outputSize = 0;        // Standardmäßig keine Ausgabeschicht
+        }
+
+        // Automatische Initialisierung der Eingabegröße
+        void setInputSize(int size) {
+            inputSize = size;
+        }
+
+        // Automatische Initialisierung der Ausgabegröße
+        void setOutputSize(int size) {
+            outputSize = size;
+        }
+
+        // Fügt eine Schicht zum Modell hinzu
+        void addLayer(int numNeurons, int numInputsPerNeuron = 0) {
+            Layer *newLayer = new Layer;
+            int numInputs = (ArraySize(layers) > 0) ? layers[ArraySize(layers) - 1].getNumNeurons() : inputSize;
+            newLayer.init(numNeurons, numInputs);
+            ArrayResize(layers, ArraySize(layers) + 1);
+            layers[ArraySize(layers) - 1] = newLayer;
+        }
+
+        // Führt einen Vorwärtsdurchlauf durch
+        void predict(double &inputs[], double &outputs[]) {
+            if (ArraySize(layers) == 0) {
+                Print("Keine Schichten im Modell definiert!");
+                return;
+            }
+
+            double tempInputs[];
+            double tempOutputs[];
+            ArrayCopy(tempInputs, inputs);
+
+            for (int i = 0; i < ArraySize(layers); i++) {
+                layers[i].forward(tempInputs, tempOutputs);
+                ArrayCopy(tempInputs, tempOutputs); // Übertrag der Ausgaben als Eingaben für die nächste Schicht
+            }
+
+            ArrayResize(outputs, ArraySize(tempOutputs));
+            ArrayCopy(outputs, tempOutputs);
+        }
+
+        // Automatische Erstellung von Eingabe- und Ausgabeschichten
+        void buildAuto(double &inputs[], double &targets[]) {
+            if (inputSize == 0) {
+                inputSize = ArraySize(inputs);
+            }
+            if (outputSize == 0) {
+                outputSize = ArraySize(targets);
+            }
+
+            // Eingabeschicht erstellen
+            if (ArraySize(layers) == 0) {
+                addLayer(inputSize, 0); // Die Eingabeschicht mit der Größe der Eingabedaten
+            }
+
+            // Sicherstellen, dass die letzte Schicht die Ausgabeschicht ist
+            if (ArraySize(layers) > 0 && layers[ArraySize(layers) - 1].getNumNeurons() != outputSize) {
+                addLayer(outputSize, layers[ArraySize(layers) - 1].getNumNeurons());
+            }
+
+            Print("Modell automatisch erstellt: Eingabegröße: ", inputSize, ", Ausgabegröße: ", outputSize);
+        }
+
+        // Trainingsmethode
+        void train(double &inputs[], double &targets[], int epochs) {
+            if (ArraySize(layers) == 0) {
+                Print("Keine Schichten im Modell definiert!");
+                return;
+            }
+
+            if (outputSize != ArraySize(targets)) {
+                Print("Fehler: Die Ausgabeschichtgröße stimmt nicht mit der Zielgröße überein!");
+                return;
+            }
+
+            double outputs[];
+
+            for (int epoch = 0; epoch < epochs; epoch++) {
+                // Vorhersage
+                predict(inputs, outputs);
+
+                for (int i = 0; i < outputSize; i++) {
+                    // Verlust und Fehler berechnen
+                    double lossValue = lossFunction.calculateLoss(targets[i], outputs[i]);
+                    double error = lossFunction.calculateGradient(targets[i], outputs[i]);
+
+                    // Backpropagation durch alle Schichten
+                    for (int j = ArraySize(layers) - 1; j >= 0; j--) {
+                        for (int k = 0; k < layers[j].getNumNeurons(); k++) {
+                            Neuron *neuron = layers[j].getNeuron(k);
+                            optimizer.applyGradients(*neuron, inputs, error);
+                        }
+                    }
+
+                    // Ausgabe für Monitoring
+                    if (epoch % 100 == 0 && i == 0) {
+                        Print("Epoch: ", epoch, ", Loss: ", lossValue);
+                    }
+                }
+            }
+        }
+
+        // Trainingsmethode mit Early Stopping
+        void trainWithEarlyStopping(
+            double &inputs[],
+            double target,
+            double tolerance,
+            int maxEpochs,
+            int minTolPassCont2Stop
+        ) {
+            double outputs[];       // Vorhersage-Ausgaben
+            int epoch = 0;          // Epochenzähler
+            int cntTolPass = 0;     // Toleranzpass-Zähler
+            double error = 0;       // Fehlerwert
+            double lossValue = 0;   // Verlustwert
+
+            while (epoch < maxEpochs) {
+                // Vorhersage
+                predict(inputs, outputs);
+
+                // Verlust und Fehler berechnen
+                lossValue = lossFunction.calculateLoss(target, outputs[0]);
+                error = lossFunction.calculateGradient(target, outputs[0]);
+
+                // Backpropagation durch alle Schichten
+                for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+                    for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+                        Neuron *neuron = layers[i].getNeuron(j);
+                        optimizer.applyGradients(*neuron, inputs, error);
+                    }
+                }
+
+                // Epochenzähler erhöhen
+                epoch++;
+
+                // Überprüfen, ob der Fehler innerhalb der Toleranz liegt
+                if (MathAbs(error) <= tolerance) {
+                    cntTolPass++;
+                } else {
+                    cntTolPass = 0; // Zurücksetzen, wenn Fehler außerhalb der Toleranz liegt
+                }
+
+                // Wenn die Bedingung für kontinuierliche Toleranz erfüllt ist, abbrechen
+                if (cntTolPass >= minTolPassCont2Stop) {
+                    Print("Frühes Stoppen nach ", epoch, " Epochen. Verlust: ", lossValue, ", Fehler: ", error);
+                    break;
+                }
+
+                // Optional: Fortschritt ausgeben
+                if (epoch % 100 == 0) {
+                    Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
+                }
+            }
+
+            // Abschlussausgabe
+            Print("Training abgeschlossen nach ", epoch, " Epochen mit Verlust: ", lossValue, ", Fehler: ", error);
+        }
+
+        // Zerstörer: Löscht alle Layer im Modell
+        ~Modelauto() {
+            for (int i = 0; i < ArraySize(layers); i++) {
+                delete layers[i];
+            }
+        }
+};
