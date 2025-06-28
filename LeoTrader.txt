@@ -63,7 +63,7 @@ bool look4Sell;
 
 
 // -- test Correlator-Verhältnise
-input bool correlatorTest=true;
+input bool correlatorTest=false;
 
 
 // -- Risikomanagement
@@ -96,16 +96,41 @@ int sessionEndHour  [3] = { 7,15, 23};
 enum Zones { Z_ASIA=0, Z_EURO=1, Z_USA=2 };
 string zoneNames[3] = {"Asia","Europe","USA"};
 
+//--- Mögliche Alignments ------------------------------------
+enum ZoneAlignment {
+   ALL_ALIGN_BUY,               // alle drei Zonen in gleicher Richtung
+   TWO_DOM_ONE_CORR_BUY,        // zwei dominieren, eine ist Gegenkorrektur
+   ONE_DOM_TWO_CORR_BUY,        // eine dominiert, zwei sind Korrektur
+   ALL_ALIGN_SELL,              // alle drei Zonen in gleicher Richtung
+   TWO_DOM_ONE_CORR_SELL,       // zwei dominieren, eine ist Gegenkorrektur
+   ONE_DOM_TWO_CORR_SELL,       // eine dominiert, zwei sind Korrektur
+   NO_CLEAR_PATTERN             // kein klares Muster
+};
+
+//--- Phasen-Definitionen ------------------------------
+enum MovePhase {
+   PHASE_BUY,            // Impuls in Kaufrichtung
+   PHASE_CORR_IN_BUY,    // Korrektur innerhalb eines Kaufimpulses
+   PHASE_SELL,           // Impuls in Verkaufsrichtung
+   PHASE_CORR_IN_SELL,   // Korrektur innerhalb eines Verkaufsimpulses
+   PHASE_NEUTRAL         // neutral / unklar
+};
+
 //--- Struktur für eine Session ------------------------------------------------
 struct SessionData {
     datetime start, end;            // Beginn/Ende der Session
     double   open, high, low, close;// OHLC
+    int dir;
+    double average;
+    MovePhase phase;
+    ZoneAlignment alignment;
 };
 
 //--- Arrays für Sessions --------------------------------------------------------
 SessionData closedSessions[3][3];  // [Zone][0]=letzte, [1]=vorletzte, [2]=drittletzte
 SessionData activeSession;         // laufende Session
 int         activeZoneIndex;       // aktuell aktive Zone
+int         lastZoneIndex=-1;
 
 //+------------------------------------------------------------------+
 //| Session-Zeitpunkt-Berechnung                                      |
@@ -123,9 +148,10 @@ datetime GetSessionStart(int zone, datetime t) {
             return day0 - 24*3600 + sh*3600;
     }
 }
+
 datetime GetSessionEnd(int zone, datetime t) {
-    int sh = sessionStartHour[zone];
-    int eh = sessionEndHour  [zone];
+    int sh = sessionStartHour[zone]; // 23, 7, 15
+    int eh = sessionEndHour  [zone]; // 7, 15, 23
     datetime day0 = StringToTime(TimeToString(t, TIME_DATE));
     if(sh < eh) {
         return day0 + eh*3600;
@@ -150,26 +176,40 @@ int GetActiveZone(datetime now) {
 }
 
 //+------------------------------------------------------------------+
+//| Richtung relativ zur vorherigen Zone ermitteln                    |
+//+------------------------------------------------------------------+
+int GetRelativeDirection(SessionData &prev, SessionData &curr)
+{
+   if(curr.average  > prev.average) return  1;
+   if(curr.average   < prev.average) return -1;
+   // sonst neutrale oder Korrektur-Phase
+   return 0;
+}
+
+double GetSessionAverage(SessionData &sess) {
+    return ((sess.high+sess.low+sess.close)/3);
+}
+
+//+------------------------------------------------------------------+
 //| Initialisierung: letzte 3 geschl. Sessions + laufende Session     |
 //+------------------------------------------------------------------+
 void InitSessionHistory() {
-    datetime now = TimeCurrent();
     // letzte 3 geschlossene Sessions je Zone
     for(int zone=0; zone<3; zone++) {
         for(int k=0; k<3; k++) {
-            datetime end_k   = GetSessionEnd  (zone, now - k*24*3600);
-            datetime start_k = GetSessionStart(zone, now - k*24*3600);
+            datetime end_k   = GetSessionEnd  (zone, currentTime - k*24*3600);
+            datetime start_k = GetSessionStart(zone, currentTime - k*24*3600);
             closedSessions[zone][k].start = start_k;
             closedSessions[zone][k].end   = end_k;
-            int i0 = iBarShift(Symbol(), PERIOD_M1, start_k, false);
-            int i1 = iBarShift(Symbol(), PERIOD_M1, end_k,   false);
+            int i0 = iBarShift(Symbol(), PERIOD_H1, start_k, false);
+            int i1 = iBarShift(Symbol(), PERIOD_H1, end_k,   false);
             if(i0>=0 && i1>=0 && i0<=i1) {
-                closedSessions[zone][k].open  = iOpen (Symbol(), PERIOD_M1, i0);
-                closedSessions[zone][k].close = iClose(Symbol(), PERIOD_M1, i1);
+                closedSessions[zone][k].open  = iOpen (Symbol(), PERIOD_H1, i0);
+                closedSessions[zone][k].close = iClose(Symbol(), PERIOD_H1, i1);
                 double hh=-1e9, ll=1e9;
                 for(int i=i0; i<=i1; i++) {
-                    hh = MathMax(hh, iHigh(Symbol(), PERIOD_M1, i));
-                    ll = MathMin(ll, iLow (Symbol(), PERIOD_M1, i));
+                    hh = MathMax(hh, iHigh(Symbol(), PERIOD_H1, i));
+                    ll = MathMin(ll, iLow (Symbol(), PERIOD_H1, i));
                 }
                 closedSessions[zone][k].high = hh;
                 closedSessions[zone][k].low  = ll;
@@ -179,53 +219,130 @@ void InitSessionHistory() {
                 closedSessions[zone][k].low  =
                 closedSessions[zone][k].close = 0.0;
             }
+            closedSessions[zone][k].average=GetSessionAverage(closedSessions[zone][k]);
         }
     }
+    // Initialisierung phase der geschlossene Sessions
+    closedSessions[0][2].phase = PHASE_NEUTRAL;
+    closedSessions[1][2].phase = PHASE_NEUTRAL;
+    closedSessions[2][2].phase = PHASE_NEUTRAL;
+
     // laufende Session der aktiven Zone
-    activeZoneIndex = GetActiveZone(now);
+    activeZoneIndex = GetActiveZone(currentTime);
+
+
+    for(int zone=0; zone<3; zone++){
+        for(int k=2; k>=0; k--)
+            closedSessions[zone][k].dir=-100;
+    }
+
+    double av = (closedSessions[activeZoneIndex][2].high+closedSessions[activeZoneIndex][2].low)/2;
+    if(av<closedSessions[activeZoneIndex][2].close) closedSessions[activeZoneIndex][2].dir=1;
+    else if(av>=closedSessions[activeZoneIndex][2].close) closedSessions[activeZoneIndex][2].dir=-1;
+
+    for(int zone=0; zone<3; zone++){
+        for(int k=2; k>=0; k--){
+            if(closedSessions[zone][k].dir==-100){
+                SessionData curr = closedSessions[zone][k];
+                SessionData prev = (zone == 0) ? closedSessions[2][k+1] : closedSessions[zone-1][k];
+                closedSessions[zone][k].dir = GetRelativeDirection(prev, curr);
+            }
+        }
+    }
+
     if(activeZoneIndex < 0) {
-        activeSession.start = activeSession.end = now;
+        activeSession.start = activeSession.end = currentTime;
         activeSession.open  =
         activeSession.high  =
         activeSession.low   =
-        activeSession.close = (Ask+Bid)/2;
+        activeSession.close = currentPrice;
         return;
     }
-    datetime s = GetSessionStart(activeZoneIndex, now);
-    datetime e = GetSessionEnd  (activeZoneIndex, now);
+
+    datetime s = GetSessionStart(activeZoneIndex, currentTime);
+    datetime e = GetSessionEnd  (activeZoneIndex, currentTime);
     activeSession.start = s;
     activeSession.end   = e;
-    int iO = iBarShift(Symbol(), PERIOD_M1, s, false);
-    double o = (iO>=0) ? iOpen(Symbol(), PERIOD_M1, iO) : (Ask+Bid)/2;
+    int iO = iBarShift(Symbol(), PERIOD_H1, s, false);
+    double o = (iO>=0) ? iOpen(Symbol(), PERIOD_H1, iO) : currentPrice;
     activeSession.open =
     activeSession.high =
     activeSession.low  =
     activeSession.close= o;
+
+    AnalyzeZones();
+}
+
+//+------------------------------------------------------------------+
+//| Analyse der Zonen                                                 |
+//+------------------------------------------------------------------+
+void AnalyzeZones(void) {
+    // 1) Zähle Buy-/Sell-Signale
+    int countBuy=0, countSell=0;
+    double sum_buy=0, sum_sell=0;
+    for(int z=0; z<3; z++){
+            if(closedSessions[z][0].dir > 0) {
+                countBuy++;
+                sum_buy=+(closedSessions[z][0].high-closedSessions[z][0].average);
+            }
+            else if(closedSessions[z][0].dir < 0) {
+                countSell++;
+                sum_sell=+(closedSessions[z][0].average-closedSessions[z][0].low);
+            }
+    }
+
+    // 2) Alignment und übergeordnete Richtung
+    if(activeZoneIndex != lastZoneIndex){
+        if(countBuy == 3)                            activeSession.alignment = ALL_ALIGN_BUY;
+        else if(countSell == 3)                      activeSession.alignment = ALL_ALIGN_SELL;
+        else if(countBuy == 2 && sum_buy>sum_sell)   activeSession.alignment = TWO_DOM_ONE_CORR_BUY;
+        else if(countSell == 2 && sum_buy<sum_sell)  activeSession.alignment = TWO_DOM_ONE_CORR_SELL;
+        else if(countBuy == 1 && sum_buy>sum_sell)   activeSession.alignment = ONE_DOM_TWO_CORR_BUY;
+        else if(countSell == 1 && sum_buy<sum_sell)  activeSession.alignment = ONE_DOM_TWO_CORR_SELL;
+        else                                         activeSession.alignment = NO_CLEAR_PATTERN;
+    }
+
+    // Relativ-Logik: Impuls vs. Korrektur anhand prev→curr :contentReference[oaicite:3]{index=3}
+    if(ALL_ALIGN_BUY)               activeSession.phase = PHASE_BUY;
+    else if(ALL_ALIGN_SELL)         activeSession.phase = PHASE_SELL;
+    else if(TWO_DOM_ONE_CORR_BUY)   activeSession.phase = (activeSession.dir == 1) ? PHASE_BUY : PHASE_CORR_IN_BUY;
+    else if(TWO_DOM_ONE_CORR_SELL)  activeSession.phase = (activeSession.dir == -1) ? PHASE_SELL : PHASE_CORR_IN_SELL;
+    else if(ONE_DOM_TWO_CORR_BUY)   activeSession.phase = (activeSession.dir > 1) ? PHASE_BUY : PHASE_CORR_IN_BUY;
+    else if(ONE_DOM_TWO_CORR_SELL)  activeSession.phase = (activeSession.dir == -1) ? PHASE_SELL : PHASE_CORR_IN_SELL;
+    else activeSession.phase = PHASE_NEUTRAL;
 }
 
 //+------------------------------------------------------------------+
 //| Laufende Aktualisierung der aktiven Session                      |
 //+------------------------------------------------------------------+
 void UpdateSessionData() {
-    datetime now = TimeCurrent();
-    int z = GetActiveZone(now);
-    if(z < 0) return;
-    activeZoneIndex = z;
-    activeSession.start = GetSessionStart(z, now);
-    activeSession.end   = GetSessionEnd  (z, now);
-    static bool initDone = false;
-    if(!initDone || now < activeSession.start) {
-        int iO = iBarShift(Symbol(), PERIOD_M1, activeSession.start, false);
+    activeZoneIndex = GetActiveZone(currentTime);
+    if(activeZoneIndex < 0) return;
+    activeSession.start = GetSessionStart(activeZoneIndex, currentTime);
+    activeSession.end   = GetSessionEnd  (activeZoneIndex, currentTime);
+    SessionData prev = (activeZoneIndex == 0) ? closedSessions[2][0] : closedSessions[activeZoneIndex-1][0];
+    
+    if(lastZoneIndex != activeZoneIndex) {
+        
+        int iO = iBarShift(Symbol(), PERIOD_H1, activeSession.start, false);
+        if(lastZoneIndex>=0){
+            closedSessions[lastZoneIndex][2]=closedSessions[lastZoneIndex][1];
+            closedSessions[lastZoneIndex][1]=closedSessions[lastZoneIndex][0];
+            closedSessions[lastZoneIndex][0]=activeSession;
+        }
+
         activeSession.open =
         activeSession.high =
         activeSession.low  =
-        activeSession.close= (iO>=0) ? iOpen(Symbol(), PERIOD_M1, iO) : (Ask+Bid)/2;
-        initDone = true;
+        activeSession.close= (iO>=0) ? iOpen(Symbol(), PERIOD_H1, iO) : currentPrice;
+        lastZoneIndex=activeZoneIndex;
     }
-    double price = (Ask+Bid)/2;
-    activeSession.high  = MathMax(activeSession.high, price);
-    activeSession.low   = MathMin(activeSession.low,  price);
-    activeSession.close = price;
+    activeSession.high  = MathMax(activeSession.high, currentPrice);
+    activeSession.low   = MathMin(activeSession.low,  currentPrice);
+    activeSession.close = currentPrice;
+    activeSession.average=GetSessionAverage(activeSession);
+    activeSession.dir=GetRelativeDirection(prev, activeSession);
+    AnalyzeZones();
 }
 
 //+------------------------------------------------------------------+
@@ -257,86 +374,7 @@ void PrintAllSessionData() {
     );
 }
 
-//--- Mögliche Alignments ------------------------------------
-enum ZoneAlignment {
-   ALL_ALIGN,               // alle drei Zonen in gleicher Richtung
-   TWO_DOM_ONE_CORR,        // zwei dominieren, eine ist Gegenkorrektur
-   ONE_DOM_TWO_CORR,        // eine dominiert, zwei sind Korrektur
-   NO_CLEAR_PATTERN         // kein klares Muster
-};
 
-//--- Mögliche Phasen der Bewegung ----------------------------
-enum MovePhase {
-   PHASE_IMPULSE_START,     // Impuls am Anfang
-   PHASE_IMPULSE_END,       // Impuls kurz vor Ende
-   PHASE_CORR_START,        // Korrektur am Anfang
-   PHASE_CORR_END,          // Korrektur am Ende
-   PHASE_NEUTRAL            // neutral / undefiniert
-};
-
-//--- Hilfsfunktion: Richtung einer Session (1=Long, -1=Short, 0=Flat)
-int GetSessionDirection(SessionData &sd)
-{
-   double delta = sd.close - sd.open;
-   if(delta > (sd.high - sd.low) * 0.05) return  1;  // >5% Range → Long
-   if(delta < -(sd.high - sd.low) * 0.05) return -1;  // >5% Range → Short
-   return 0;
-}
-
-//--- Hilfsfunktion: Stadium innerhalb der Session [0..1]
-double GetSessionProgress(SessionData &sd)
-{
-   double range = sd.high - sd.low;
-   if(range <= 0) return 0.0;
-   return (sd.close - sd.open) / range;  // <0 = Unterwegskorrektur, >1 = Überlauf
-}
-
-//--- Haupt-Analyse-Funktion -----------------------------------
-void AnalyzeZones(ZoneAlignment &alignment, MovePhase &phase)
-{
-   // 1) Richtungen der letzten abgeschlossenen Sessions
-   int dir[3]={0,0,0};
-   for(int z=0; z<3; z++)
-      dir[z] = GetSessionDirection(closedSessions[z][0]);
-
-   // 2) Zählen
-   int countLong=0, countShort=0;
-   for(int z=0; z<3; z++){
-      if(dir[z]>0)      countLong++;
-      else if(dir[z]<0) countShort++;
-   }
-
-   // 3) Alignment bestimmen
-   if(countLong==3||countShort==3)          alignment = ALL_ALIGN;
-   else if((countLong==2&&countShort==1)||(countShort==2&&countLong==1))
-                                            alignment = TWO_DOM_ONE_CORR;
-   else if((countLong==1&&countShort==2)||(countShort==1&&countLong==2))
-                                            alignment = ONE_DOM_TWO_CORR;
-   else                                     alignment = NO_CLEAR_PATTERN;
-
-   // 4) Phase anhand der **laufenden** Session schätzen
-   double prog = GetSessionProgress(activeSession);
-
-   // Wenn alle Zonen gleich
-   if(alignment==ALL_ALIGN){
-      if(prog<0.3)                                phase = PHASE_IMPULSE_START;
-      else if(prog>0.7)                           phase = PHASE_IMPULSE_END;
-      else                                        phase = PHASE_NEUTRAL;
-   }
-   // 2 Dom., 1 Corr → nur Frührisiko im Impuls
-   else if(alignment==TWO_DOM_ONE_CORR){
-      if(prog<0.3)                                phase = PHASE_IMPULSE_START;
-      else                                        phase = PHASE_NEUTRAL;
-   }
-   // 1 Dom., 2 Corr → konservativ, nur Korrekturphasen
-   else if(alignment==ONE_DOM_TWO_CORR){
-      if(prog<0.3)                                phase = PHASE_CORR_START;
-      else if(prog>0.7)                           phase = PHASE_CORR_END;
-      else                                        phase = PHASE_NEUTRAL;
-   }
-   // sonst neutral
-   else                                          phase = PHASE_NEUTRAL;
-}
 
 //+------------------------------------------------------------------+
 //| LeoSensors                                                       |
@@ -768,7 +806,7 @@ class LeoSensors{
             else{
                 if(iHigh(Symbol(), timeframe, 0)>upperBearCandidates[0])
                     upperBearCandidates[0]=iHigh(Symbol(), timeframe, 0);
-                if(iLow(Symbol(), timeframe, 0)<lowerBullCandidates[0])
+                if((iLow(Symbol(), timeframe, 0)<lowerBullCandidates[0]) || (lowerBullCandidates[0]==0))
                     lowerBullCandidates[0] = iLow(Symbol(), timeframe, 0); 
             }
 
@@ -1604,11 +1642,27 @@ class Correlator {
         
         filterBuyLevel = 0;
         filterSellLevel = 0;
-        // 1) Session-Daten aktualisieren (bereits in UpdateSessionData)
+        // Session-Daten aktualisieren (bereits in UpdateSessionData)
         UpdateSessionData();
 
-        // 2) Marketzone-Analyse
-        AnalyzeZones(zoneAlignment, movePhase);
+        
+
+        // -> Zonen-Gewichtung ermitteln
+        double zoneWeight = 0.0;
+        switch(activeSession.alignment) {
+            case ALL_ALIGN_BUY:         zoneWeight = 1.2; break;
+            case ALL_ALIGN_SELL:        zoneWeight = 1.2; break;
+            case TWO_DOM_ONE_CORR_BUY:  zoneWeight = 1.0; break;
+            case TWO_DOM_ONE_CORR_SELL: zoneWeight = 1.0; break;
+            case ONE_DOM_TWO_CORR_BUY:  zoneWeight = 0.8; break;
+            case ONE_DOM_TWO_CORR_SELL: zoneWeight = 0.8; break;
+            case NO_CLEAR_PATTERN:      zoneWeight = 0.0; break;
+        }
+        // Feinanpassung je nach Phase
+        if(activeSession.phase == PHASE_BUY || activeSession.phase == PHASE_SELL)      zoneWeight *= 1.1;
+        else if(activeSession.phase == PHASE_CORR_IN_BUY || activeSession.phase == PHASE_CORR_IN_SELL)  zoneWeight *= 0.7;
+        else if(activeSession.phase == PHASE_NEUTRAL)   zoneWeight *= 0.5;
+        // sonst PHASE_NEUTRAL: zoneWeight bleibt
         
 
         // 3) Sensor-Daten ziehen
@@ -1658,11 +1712,8 @@ class Correlator {
             }
 
 
-
-        
-
         // gieb atr den Dominante sensor ls[dominant].atr für Berrechnung der Stoploss und Takegewinn
-        atr = MathAbs(atr);
+        
 
         setStoWave(ls[0], wM5);
         setStoWave(ls[1], wM15);
@@ -1681,11 +1732,8 @@ class Correlator {
         for (int i = 0; i<ArraySize(wH4); i++ )
             waves[4][i] = wH4[i];
 
-
-        
         MaxMinAve_WaveDP();
-        
-         
+                 
 		// Implementieren der Hauptroutine des Korrelatores
         CorrelateZigFibSto();
 
@@ -1727,28 +1775,80 @@ class Correlator {
         
         // -- bewerten von look4Buy oder look4Sell anhand ergebnisse der ready2StartLook4Buy[5] oder ready2StartLook4Buy[5]
 
+        // gab Breakout?
+        //      ja:  ist höhe/tiefe (nächste Fiboline) Punkt erreicht?
+        //          ja:  hat korrektur stattgefunden?
+        //              ja:  dann look4Buy=true oder look4Sell=true richtungs breackout oder häftige kursbewegung
+        //              nein: look4Buy=false oder look4Sell=false
+        //          nein: handeln richtung der nächsten Fiboline
+        //      nein:  ermitteln letzte Breakout-Richtung
+        //             liegt der Kurs in der Nähe der letzten Breakout-Linie?
+        //             ja:  unterstützen die Sensoren neue Breakout?
+        //                  ja: breakout handeln vorbereiten
+        //                  nein: gegenrichtung handeln
+        //             nein:  weiter in der alten Richtung handeln
 
+        if(LS_H4.zigTrendBuy && LS_H4.aktiveFibLev>10){
+            
+        }
+        else if(LS_H4.zigTrendSell && LS_H4.aktiveFibLev<7){
+
+        }
+        else{ // keine klare Richtung bzw. kein Breakout (Flachmarkt)
+            // mini-trend bzw. support- und widerstandsniveau linien finden
+        }
+        
         CorrelateMACDStochastic();
-        
-        if(buyLevel>0 && sumZigSell==0 && sumZigBuy>0){
-            look4Buy = true;
-            // Neuer Risikofaktor 30-100
-            double score = (double)sumZigBuy / ((double)sumZigBuy + MathAbs(sumZigSell) + 1);
-            riskFactor = (int)(30 + 70 * score);
-            riskFactor = MathMax(30, MathMin(100, riskFactor));
-            riskFactor/= 50;
+        atr = MathAbs(atr);
+
+        if (zoneWeight==0) {
+            look4Sell = false;
+            look4Buy = false;
         }
-        else look4Buy = false;
+        else{
+            if(buyLevel>0 && sumZigSell==0 && sumZigBuy>0){ //(movePhase == PHASE_BUY || movePhase == PHASE_CORR_IN_SELL) && 
+                look4Buy = true;
+                // Neuer Risikofaktor 30-100
+                double score = (double)sumZigBuy / ((double)sumZigBuy + MathAbs(sumZigSell) + 1);
+                riskFactor = (int)(30 + 70 * score * zoneWeight);
+                riskFactor = MathMax(30, MathMin(100, riskFactor));
+                riskFactor/= 50;
+            }
         
-        if(sellLevel>0 && sumZigBuy==0 && sumZigSell>0){
-            look4Sell = true;
-            // Neuer Risikofaktor 30-100
-            double score = (double)sumZigSell / ((double)sumZigBuy + MathAbs(sumZigSell) + 1);
-            riskFactor = (int)(30 + 70 * score);
-            riskFactor = MathMax(30, MathMin(100, riskFactor));
-            riskFactor/= 50;
+            else if(sellLevel>0 && sumZigBuy==0 && sumZigSell>0){ //(movePhase == PHASE_SELL || movePhase == PHASE_CORR_IN_BUY) && 
+                look4Sell = true;
+                // Neuer Risikofaktor 30-100
+                double score = (double)sumZigSell / ((double)sumZigBuy + MathAbs(sumZigSell) + 1);
+                riskFactor = (int)(30 + 70 * score * zoneWeight);
+                riskFactor = MathMax(30, MathMin(100, riskFactor));
+                riskFactor/= 50;
+            }
+            
+            else{
+                look4Buy=false;
+                look4Sell = false;
+            }
+            
         }
-        else look4Sell = false;
+
+
+
+        // riskFactor=zoneWeight;
+        
+        // if(movePhase == PHASE_BUY || movePhase == PHASE_CORR_IN_SELL){
+        //     look4Buy=true;
+        //     look4Sell = false;
+        // }
+        // else if(movePhase == PHASE_SELL || movePhase == PHASE_CORR_IN_BUY){
+        //     look4Buy=false;
+        //     look4Sell = true;
+        // }
+        // else{
+        //     look4Buy=false;
+        //     look4Sell = false;
+        // }
+        
+
 	}
 
 Correlator correlat;
@@ -1776,12 +1876,14 @@ struct MyOrder{
 
 
 //+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| Expert initialization function                                 |
 //+------------------------------------------------------------------+
 int OnInit()
 {
     //---
     currentTime=TimeCurrent();
+    currentPrice = (Ask+Bid)/2;
+
     Print ("OnInit");
     char x[10]; // to creat magic number based on symbol name
     pipValue   = MarketInfo(Symbol(),MODE_POINT); 
@@ -2025,12 +2127,12 @@ void updateSensors(){
     }
 
     // ################################################## Setup final lines
-    if(correlat.look4Buy){ 
+    if(look4Buy){ 
         buy_limit=buy_limit_small;
         buy_stop=buy_stop_small;
         // sell_limit = sell_stop = 0;
     }
-    else if(correlat.look4Sell){ 
+    else if(look4Sell){ 
         sell_limit=sell_limit_small;
         sell_stop=sell_stop_small;
         // buy_limit = buy_stop =0;
@@ -2055,7 +2157,11 @@ void checkClose()
             double epsilon=estimatedProfit/20;
 
             // close buy positions before raising swap
-            if( (!correlatorTest && TimeHour(currentTime)>=22)
+            if( (!correlatorTest && (
+                    TimeHour(currentTime)>=22 
+                    // || 
+                    // correlat.look4Sell
+                    ))
                 ||
                 (correlatorTest && correlat.look4Sell)
                 ) closePos=true;
@@ -2068,8 +2174,8 @@ void checkClose()
 
             if(!correlatorTest && currentProfit>pipValue*100 && currentProfit>atr*0.5 ){
                 // adjust take profit
-                // resFibLev, AllFibo[], resFibLev_candel,fibo_candel[]
-                // if(LS_H4.lastFibLevValue_candel>=currRobotBuf.TakeProfit || LS_H4.lastFibLevValue>=currRobotBuf.TakeProfit)
+                
+
                 // adjust stoploss 
                 
                 if((currentPrice-LS_M5.MyZigLawn+minStopLevel)>50*pipValue && (LS_M5.MyZigLawn-currRobotBuf.openPrice)>50*pipValue && currRobotBuf.StopLoss<LS_M5.MyZigLawn)
@@ -2092,8 +2198,8 @@ void checkClose()
             
             // apply the decision (close or modify position)
             // ---------------------------------------------
-            if(closePos) ModifyTP(CLOSE_BUY, currRobotBuf);
-            else if(!correlatorTest && needModify) ModifyTP(OP_BUY, currRobotBuf);
+            // if(closePos) ModifyTP(CLOSE_BUY, currRobotBuf);
+            // else if(!correlatorTest && needModify) ModifyTP(OP_BUY, currRobotBuf);
             
         }
 
@@ -2103,7 +2209,11 @@ void checkClose()
             double epsilon=estimatedProfit/20;
 
             // close buy positions before raising swap
-            if((!correlatorTest && TimeHour(currentTime)>=22)
+            if((!correlatorTest && (
+                    TimeHour(currentTime)>=22 
+                    // || 
+                    // correlat.look4Buy
+                    ))
                 ||
                 (correlatorTest && correlat.look4Buy)
                 ) closePos=true;
@@ -2137,8 +2247,8 @@ void checkClose()
 
             // apply the decision (close or modify position) 
             // ---------------------------------------------
-            if(closePos) ModifyTP(CLOSE_SELL, currRobotBuf);
-            else if(!correlatorTest && needModify) ModifyTP(OP_SELL, currRobotBuf);
+            // if(closePos) ModifyTP(CLOSE_SELL, currRobotBuf);
+            // else if(!correlatorTest && needModify) ModifyTP(OP_SELL, currRobotBuf);
         }
 
     }// ende Robot
@@ -2207,6 +2317,12 @@ int getCMD()
 
             currRobotBuf.StopLoss=currentPrice-(atr*0.25);
             currRobotBuf.TakeProfit=currentPrice+(atr*2);
+            if (currRobotBuf.StopLoss > LS_H1.lowerBullCandidates[0])
+                currRobotBuf.StopLoss = LS_H1.lowerBullCandidates[0]-(atr*0.25);
+            if (MathAbs(currRobotBuf.TakeProfit - currentPrice) < MathAbs(currRobotBuf.StopLoss - currentPrice)) {
+                currRobotBuf.StopLoss = currentPrice - atr ;
+            }
+
         }
         
         // Sell 
@@ -2226,6 +2342,11 @@ int getCMD()
             
             currRobotBuf.StopLoss=currentPrice+(atr*0.25);
             currRobotBuf.TakeProfit=currentPrice-(atr*2);
+            if (currRobotBuf.StopLoss< LS_H1.upperBearCandidates[0])
+                currRobotBuf.StopLoss=LS_H1.upperBearCandidates[0]+(atr*0.25);
+            if (MathAbs(currRobotBuf.TakeProfit - currentPrice) < MathAbs(currRobotBuf.StopLoss - currentPrice)) {
+                currRobotBuf.StopLoss = currentPrice + atr ;
+            }    
             
         }
 
@@ -2615,3 +2736,594 @@ void ModifyTP(int cmd, MyOrder& TargetOrder)
     }
 
 }
+
+
+
+
+// class Neuron {
+//     private:
+//         double weights[];  // Gewichte des Neurons
+//         double bias;       // Bias-Wert
+
+//         // Aktivierungsfunktion (Sigmoid)
+//         double activate(double x) {
+//             return 1 / (1 + MathExp(-x));
+//         }
+
+//     public:
+//         // Konstruktor: Initialisierung
+//         Neuron(int numInputs) {
+//             ArrayResize(weights, numInputs);
+//             for (int i = 0; i < numInputs; i++) {
+//                 weights[i] = MathRand() * 0.01; // Zufällige Gewichte
+//             }
+//             bias = MathRand() * 0.01; // Zufälliger Bias
+//         }
+
+//         // Berechnung des Outputs
+//         double predict(const double &inputs[]) {
+//             double sum = 0;
+//             for (int i = 0; i < ArraySize(inputs); i++) {
+//                 sum += inputs[i] * weights[i];
+//             }
+//             sum += bias; // Bias hinzufügen
+//             return activate(sum);
+//         }
+
+//         // Zugriff auf die Gewichte und den Bias
+//         double getWeight(int i) { return weights[i]; }
+//         double getBias() { return bias; }
+//         void setWeight(int i, double value) { weights[i] = value; }
+//         void setBias(double value) { bias = value; }
+//         int getNumWeights() { return ArraySize(weights); }
+// };
+
+// class Optimizer {
+//     private:
+//         string optimizationType;  // Typ des Optimierungsalgorithmus
+//         double learningRate;      // Lernrate
+//         double beta1;             // Adam/Momentum Parameter
+//         double beta2;             // Adam Parameter
+//         double epsilon;           // Stabilitätskonstante
+//         double m[];               // Momentum-Cache
+//         double v[];               // RMSProp-Cache
+//         double mBias;             // Momentum-Cache für Bias
+//         double vBias;             // RMSProp-Cache für Bias
+//         int t;                    // Iterationszähler
+
+//     public:
+//         Optimizer(double lr, string optType = "SGD", double b1 = 0.9, double b2 = 0.999, double eps = 1e-8) {
+//             learningRate = lr;
+//             optimizationType = optType;
+//             beta1 = b1;
+//             beta2 = b2;
+//             epsilon = eps;
+//             mBias = 0.0;
+//             vBias = 0.0;
+//             t = 0;
+//         }
+
+//         void applyGradients(Neuron &neuron, const double &inputs[], double error) {
+//             int numWeights = neuron.getNumWeights();
+
+//             // Initialisiere Cache-Arrays
+//             if (ArraySize(m) != numWeights) {
+//                 ArrayResize(m, numWeights);
+//                 ArrayResize(v, numWeights);
+//                 ArrayInitialize(m, 0.0);
+//                 ArrayInitialize(v, 0.0);
+//             }
+
+//             t++;
+
+//             Print("numWeights: ",numWeights);
+//             for (int i = 0; i < numWeights; i++) {
+//                 Print("i: ",i);
+//                 double grad = error * inputs[i];
+//                 if (optimizationType == "Adam") {
+//                     m[i] = beta1 * m[i] + (1 - beta1) * grad;
+//                     v[i] = beta2 * v[i] + (1 - beta2) * grad * grad;
+
+//                     double mHat = m[i] / (1 - MathPow(beta1, t));
+//                     double vHat = v[i] / (1 - MathPow(beta2, t));
+
+//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * mHat / (MathSqrt(vHat) + epsilon));
+//                 } else if (optimizationType == "Momentum") {
+//                     m[i] = beta1 * m[i] + grad;
+//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * m[i]);
+//                 } else {
+//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * grad);
+//                 }
+//             }
+
+//             double gradBias = error;
+//             if (optimizationType == "Adam") {
+//                 mBias = beta1 * mBias + (1 - beta1) * gradBias;
+//                 vBias = beta2 * vBias + (1 - beta2) * gradBias * gradBias;
+
+//                 double mHatBias = mBias / (1 - MathPow(beta1, t));
+//                 double vHatBias = vBias / (1 - MathPow(beta2, t));
+
+//                 neuron.setBias(neuron.getBias() - learningRate * mHatBias / (MathSqrt(vHatBias) + epsilon));
+//             } else if (optimizationType == "Momentum") {
+//                 mBias = beta1 * mBias + gradBias;
+//                 neuron.setBias(neuron.getBias() - learningRate * mBias);
+//             } else {
+//                 neuron.setBias(neuron.getBias() - learningRate * gradBias);
+//             }
+//         }
+// };
+
+// class Loss {
+//     private:
+//         string lossType;
+
+//     public:
+//         Loss(string type = "MSE") {
+//             lossType = type;
+//         }
+
+//         double calculateLoss(double target, double output) {
+//             if (lossType == "MSE") {
+//                 return MathPow(target - output, 2);
+//             } else if (lossType == "MAE") {
+//                 return MathAbs(target - output);
+//             } else {
+//                 Print("Unbekannter Verlusttyp: ", lossType);
+//                 return 0.0;
+//             }
+//         }
+
+//         double calculateGradient(double target, double output) {
+//             if (lossType == "MSE") {
+//                 return -2 * (target - output);
+//             } else if (lossType == "MAE") {
+//                 return (target > output) ? -1 : 1;
+//             } else {
+//                 Print("Unbekannter Verlusttyp: ", lossType);
+//                 return 0.0;
+//             }
+//         }
+// };
+
+// class Layer {
+//     private:
+//         Neuron *neurons[];  // Array von Zeigern auf Neuronen
+
+//     public:
+//         // Konstruktor: Initialisiert die Schicht mit einer bestimmten Anzahl von Neuronen
+//         void init(int numNeurons, int numInputsPerNeuron) {
+//             ArrayResize(neurons, numNeurons);
+//             for (int i = 0; i < numNeurons; i++) {
+//                 neurons[i] = new Neuron(numInputsPerNeuron); // Neuron initialisieren
+//             }
+//         }
+
+//         // Berechnet die Ausgaben der Schicht basierend auf den Eingaben
+//         void forward(double &inputs[], double &outputs[]) {
+//             ArrayResize(outputs, ArraySize(neurons));
+//             for (int i = 0; i < ArraySize(neurons); i++) {
+//                 outputs[i] = neurons[i].predict(inputs);
+//             }
+//         }
+
+//         // Zugriff auf Neuronen
+//         Neuron *getNeuron(int index) {
+//             if (index >= 0 && index < ArraySize(neurons)) {
+//                 return neurons[index];
+//             }
+//             return NULL;
+//         }
+
+//         int getNumNeurons() {
+//             return ArraySize(neurons);
+//         }
+
+//         // Zerstörer: Löscht alle Neuronen in der Schicht
+//         ~Layer() {
+//             for (int i = 0; i < ArraySize(neurons); i++) {
+//                 delete neurons[i];
+//             }
+//         }
+// };
+
+
+// class SequentialModel {
+//     private:
+//         Layer *layers[];          // Array von Zeigern auf Layer
+//         Optimizer *optimizer;     // Zeiger auf den Optimierungsalgorithmus
+//         Loss *lossFunction;       // Zeiger auf die Verlustfunktion
+
+//     public:
+//         // Konstruktor: Initialisiert das Modell
+//         void init(Optimizer &opt, Loss &loss) {
+//             optimizer = &opt;      // Optimierer zuweisen
+//             lossFunction = &loss; // Verlustfunktion zuweisen
+//         }
+
+//         // Fügt eine Schicht zum Modell hinzu
+//         void addLayer(int numNeurons, int numInputsPerNeuron = 0) {
+//             Layer *newLayer = new Layer;
+//             int numInputs = (ArraySize(layers) > 0) ? layers[ArraySize(layers) - 1].getNumNeurons() : numInputsPerNeuron;
+//             newLayer.init(numNeurons, numInputs);
+//             ArrayResize(layers, ArraySize(layers) + 1);
+//             layers[ArraySize(layers) - 1] = newLayer;
+//         }
+
+//         // Führt einen Vorwärtsdurchlauf durch
+//         // void predict(double &inputs[], double &outputs[]) {
+//         //     double tempInputs[];
+//         //     double tempOutputs[];
+//         //     ArrayCopy(tempInputs, inputs);
+
+//         //     for (int i = 0; i < ArraySize(layers); i++) {
+//         //         layers[i].forward(tempInputs, tempOutputs);
+//         //         ArrayCopy(tempInputs, tempOutputs); // Übertrag der Ausgaben als Eingaben für die nächste Schicht
+//         //     }
+
+//         //     ArrayResize(outputs, ArraySize(tempOutputs));
+//         //     ArrayCopy(outputs, tempOutputs);
+//         // }
+
+//         void predict(double &inputs[], double &outputs[]) {
+//             double tempInputs[];
+//             double tempOutputs[];
+//             ArrayCopy(tempInputs, inputs); // Eingaben kopieren
+
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 layers[i].forward(tempInputs, tempOutputs); // Vorwärtsdurchlauf
+//                 ArrayResize(tempInputs, ArraySize(tempOutputs));
+//                 ArrayCopy(tempInputs, tempOutputs); // Ausgaben als Eingaben weitergeben
+//             }
+
+//             ArrayResize(outputs, ArraySize(tempOutputs));
+//             ArrayCopy(outputs, tempOutputs); // Finale Ausgaben kopieren
+//         }
+
+//         // Trainingsmethode
+//         void train(double &inputs[], double target, int epochs) {
+//             double outputs[];
+
+//             for (int epoch = 0; epoch < epochs; epoch++) {
+//                 // Vorhersage
+//                 predict(inputs, outputs);
+
+//                 // Verlust und Fehler berechnen
+//                 double lossValue = lossFunction.calculateLoss(target, outputs[0]);
+//                 double error = lossFunction.calculateGradient(target, outputs[0]);
+
+//                 // Backpropagation durch alle Schichten
+//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+//                         Neuron *neuron = layers[i].getNeuron(j);
+//                         optimizer.applyGradients(*neuron, inputs, error);
+//                     }
+//                 }
+
+//                 // Ausgabe für Monitoring
+//                 if (epoch % 100 == 0) {
+//                     Print("Epoch: ", epoch, ", Loss: ", lossValue);
+//                 }
+//             }
+//         }
+
+//         // Trainingsmethode mit Early Stopping
+//         void trainWithEarlyStopping(
+//             double &inputs[],
+//             double target,
+//             double tolerance,
+//             int maxEpochs,
+//             int minTolPassCont2Stop
+//         ) {
+//             double outputs[];       // Vorhersage-Ausgaben
+//             int epoch = 0;          // Epochenzähler
+//             int cntTolPass = 0;     // Toleranzpass-Zähler
+//             double error = 0;       // Fehlerwert
+//             double lossValue = 0;   // Verlustwert
+
+//             while (epoch < maxEpochs) {
+//                 // Vorhersage
+//                 predict(inputs, outputs);
+
+//                 // Verlust und Fehler berechnen
+//                 lossValue = lossFunction.calculateLoss(target, outputs[0]);
+//                 error = lossFunction.calculateGradient(target, outputs[0]);
+
+//                 // Backpropagation durch alle Schichten
+//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+//                         Neuron *neuron = layers[i].getNeuron(j);
+//                         optimizer.applyGradients(*neuron, inputs, error);
+//                     }
+//                 }
+
+//                 // Epochenzähler erhöhen
+//                 epoch++;
+
+//                 // Überprüfen, ob der Fehler innerhalb der Toleranz liegt
+//                 if (MathAbs(error) <= tolerance) {
+//                     cntTolPass++;
+//                 } else {
+//                     cntTolPass = 0; // Zurücksetzen, wenn Fehler außerhalb der Toleranz liegt
+//                 }
+
+//                 // Wenn die Bedingung für kontinuierliche Toleranz erfüllt ist, abbrechen
+//                 if (cntTolPass >= minTolPassCont2Stop) {
+//                     Print("Frühes Stoppen nach ", epoch, " Epochen. Verlust: ", lossValue, ", Fehler: ", error);
+//                     break;
+//                 }
+
+//                 // Optional: Fortschritt ausgeben
+//                 if (epoch % 100 == 0) {
+//                     Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
+//                 }
+//             }
+
+//             // Abschlussausgabe
+//             Print("Training abgeschlossen nach ", epoch, " Epochen mit Verlust: ", lossValue, ", Fehler: ", error);
+//         }
+
+//         // Zerstörer: Löscht alle Layer im Modell
+//         ~SequentialModel() {
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 delete layers[i];
+//             }
+//         }
+// };
+
+// class FunctionalModel {
+//     private:
+//         Layer *layers[];   // Array von Layer-Zeigern
+//         string connections[]; // Verbindungen der Schichten, z. B. "Layer1 -> Layer2"
+//         int inputSize;     // Eingabedimension
+//         int outputSize;    // Ausgabedimension
+
+//     public:
+//         // Konstruktor: Initialisiert ein funktionales Modell
+//         FunctionalModel(int inputDim) {
+//             inputSize = inputDim;
+//             outputSize = 0; // Wird später beim Hinzufügen der Schichten definiert
+//         }
+
+//         // Fügt eine neue Schicht hinzu
+//         void addLayer(Layer &layer, int outputDim) {
+//             ArrayResize(layers, ArraySize(layers) + 1);
+//             layers[ArraySize(layers) - 1] = &layer;
+//             outputSize = outputDim; // Setzt die Ausgabedimension basierend auf der letzten Schicht
+//         }
+
+//         // Verbindet zwei Schichten
+//         void connectLayers(string from, string to) {
+//             ArrayResize(connections, ArraySize(connections) + 1);
+//             connections[ArraySize(connections) - 1] = from + " -> " + to;
+//         }
+
+//         // Führt einen Forward-Pass durch
+//         void forward(double &inputs[], double &outputs[]) {
+//             double currentInputs[];
+//             ArrayCopy(currentInputs, inputs);
+
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 double tempOutputs[];
+//                 layers[i].forward(currentInputs, tempOutputs);
+//                 ArrayCopy(currentInputs, tempOutputs); // Ausgaben der aktuellen Schicht sind Eingaben der nächsten Schicht
+//             }
+
+//             ArrayResize(outputs, ArraySize(currentInputs));
+//             ArrayCopy(outputs, currentInputs);
+//         }
+
+//         // Trainingsmethode
+//         void train(double &inputs[], double target, Optimizer &optimizer, Loss &loss, int epochs) {
+//             for (int epoch = 0; epoch < epochs; epoch++) {
+//                 double outputs[];
+//                 forward(inputs, outputs);
+
+//                 // Verlust und Fehler berechnen
+//                 double lossValue = loss.calculateLoss(target, outputs[0]);
+//                 double error = loss.calculateGradient(target, outputs[0]);
+
+//                 // Backpropagation durch alle Schichten
+//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+//                         Neuron *neuron = layers[i].getNeuron(j);
+//                         optimizer.applyGradients(*neuron, inputs, error);
+//                     }
+//                 }
+
+//                 // Ausgabe für Fortschritt
+//                 if (epoch % 100 == 0) {
+//                     Print("Epoch: ", epoch, ", Loss: ", lossValue);
+//                 }
+//             }
+//         }
+
+//         // Zeigt die Verbindungen zwischen den Schichten
+//         void printConnections() {
+//             for (int i = 0; i < ArraySize(connections); i++) {
+//                 Print(connections[i]);
+//             }
+//         }
+// };
+
+
+// class Modelauto {
+//     private:
+//         Layer *layers[];          // Array von Zeigern auf Layer
+//         Optimizer *optimizer;     // Zeiger auf den Optimierungsalgorithmus
+//         Loss *lossFunction;       // Zeiger auf die Verlustfunktion
+//         int inputSize;            // Größe der Eingabeschicht
+//         int outputSize;           // Größe der Ausgabeschicht
+
+//     public:
+//         // Konstruktor: Initialisiert das Modell
+//         void init(Optimizer &opt, Loss &loss) {
+//             optimizer = &opt;      // Optimierer zuweisen
+//             lossFunction = &loss; // Verlustfunktion zuweisen
+//             inputSize = 0;         // Standardmäßig keine Eingabeschicht
+//             outputSize = 0;        // Standardmäßig keine Ausgabeschicht
+//         }
+
+//         // Automatische Initialisierung der Eingabegröße
+//         void setInputSize(int size) {
+//             inputSize = size;
+//         }
+
+//         // Automatische Initialisierung der Ausgabegröße
+//         void setOutputSize(int size) {
+//             outputSize = size;
+//         }
+
+//         // Fügt eine Schicht zum Modell hinzu
+//         void addLayer(int numNeurons, int numInputsPerNeuron = 0) {
+//             Layer *newLayer = new Layer;
+//             int numInputs = (ArraySize(layers) > 0) ? layers[ArraySize(layers) - 1].getNumNeurons() : inputSize;
+//             newLayer.init(numNeurons, numInputs);
+//             ArrayResize(layers, ArraySize(layers) + 1);
+//             layers[ArraySize(layers) - 1] = newLayer;
+//         }
+
+//         // Führt einen Vorwärtsdurchlauf durch
+//         void predict(double &inputs[], double &outputs[]) {
+//             if (ArraySize(layers) == 0) {
+//                 Print("Keine Schichten im Modell definiert!");
+//                 return;
+//             }
+
+//             double tempInputs[];
+//             double tempOutputs[];
+//             ArrayCopy(tempInputs, inputs);
+
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 layers[i].forward(tempInputs, tempOutputs);
+//                 ArrayCopy(tempInputs, tempOutputs); // Übertrag der Ausgaben als Eingaben für die nächste Schicht
+//             }
+
+//             ArrayResize(outputs, ArraySize(tempOutputs));
+//             ArrayCopy(outputs, tempOutputs);
+//         }
+
+//         // Automatische Erstellung von Eingabe- und Ausgabeschichten
+//         void buildAuto(double &inputs[], double &targets[]) {
+//             if (inputSize == 0) {
+//                 inputSize = ArraySize(inputs);
+//             }
+//             if (outputSize == 0) {
+//                 outputSize = ArraySize(targets);
+//             }
+
+//             // Eingabeschicht erstellen
+//             if (ArraySize(layers) == 0) {
+//                 addLayer(inputSize, 0); // Die Eingabeschicht mit der Größe der Eingabedaten
+//             }
+
+//             // Sicherstellen, dass die letzte Schicht die Ausgabeschicht ist
+//             if (ArraySize(layers) > 0 && layers[ArraySize(layers) - 1].getNumNeurons() != outputSize) {
+//                 addLayer(outputSize, layers[ArraySize(layers) - 1].getNumNeurons());
+//             }
+
+//             Print("Modell automatisch erstellt: Eingabegröße: ", inputSize, ", Ausgabegröße: ", outputSize);
+//         }
+
+//         // Trainingsmethode
+//         void train(double &inputs[], double &targets[], int epochs) {
+//             if (ArraySize(layers) == 0) {
+//                 Print("Keine Schichten im Modell definiert!");
+//                 return;
+//             }
+
+//             if (outputSize != ArraySize(targets)) {
+//                 Print("Fehler: Die Ausgabeschichtgröße stimmt nicht mit der Zielgröße überein!");
+//                 return;
+//             }
+
+//             double outputs[];
+
+//             for (int epoch = 0; epoch < epochs; epoch++) {
+//                 // Vorhersage
+//                 predict(inputs, outputs);
+
+//                 for (int i = 0; i < outputSize; i++) {
+//                     // Verlust und Fehler berechnen
+//                     double lossValue = lossFunction.calculateLoss(targets[i], outputs[i]);
+//                     double error = lossFunction.calculateGradient(targets[i], outputs[i]);
+
+//                     // Backpropagation durch alle Schichten
+//                     for (int j = ArraySize(layers) - 1; j >= 0; j--) {
+//                         for (int k = 0; k < layers[j].getNumNeurons(); k++) {
+//                             Neuron *neuron = layers[j].getNeuron(k);
+//                             optimizer.applyGradients(*neuron, inputs, error);
+//                         }
+//                     }
+
+//                     // Ausgabe für Monitoring
+//                     if (epoch % 100 == 0 && i == 0) {
+//                         Print("Epoch: ", epoch, ", Loss: ", lossValue);
+//                     }
+//                 }
+//             }
+//         }
+
+//         // Trainingsmethode mit Early Stopping
+//         void trainWithEarlyStopping(
+//             double &inputs[],
+//             double target,
+//             double tolerance,
+//             int maxEpochs,
+//             int minTolPassCont2Stop
+//         ) {
+//             double outputs[];       // Vorhersage-Ausgaben
+//             int epoch = 0;          // Epochenzähler
+//             int cntTolPass = 0;     // Toleranzpass-Zähler
+//             double error = 0;       // Fehlerwert
+//             double lossValue = 0;   // Verlustwert
+
+//             while (epoch < maxEpochs) {
+//                 // Vorhersage
+//                 predict(inputs, outputs);
+
+//                 // Verlust und Fehler berechnen
+//                 lossValue = lossFunction.calculateLoss(target, outputs[0]);
+//                 error = lossFunction.calculateGradient(target, outputs[0]);
+
+//                 // Backpropagation durch alle Schichten
+//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+//                         Neuron *neuron = layers[i].getNeuron(j);
+//                         optimizer.applyGradients(*neuron, inputs, error);
+//                     }
+//                 }
+
+//                 // Epochenzähler erhöhen
+//                 epoch++;
+
+//                 // Überprüfen, ob der Fehler innerhalb der Toleranz liegt
+//                 if (MathAbs(error) <= tolerance) {
+//                     cntTolPass++;
+//                 } else {
+//                     cntTolPass = 0; // Zurücksetzen, wenn Fehler außerhalb der Toleranz liegt
+//                 }
+
+//                 // Wenn die Bedingung für kontinuierliche Toleranz erfüllt ist, abbrechen
+//                 if (cntTolPass >= minTolPassCont2Stop) {
+//                     Print("Frühes Stoppen nach ", epoch, " Epochen. Verlust: ", lossValue, ", Fehler: ", error);
+//                     break;
+//                 }
+
+//                 // Optional: Fortschritt ausgeben
+//                 if (epoch % 100 == 0) {
+//                     Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
+//                 }
+//             }
+
+//             // Abschlussausgabe
+//             Print("Training abgeschlossen nach ", epoch, " Epochen mit Verlust: ", lossValue, ", Fehler: ", error);
+//         }
+
+//         // Zerstörer: Löscht alle Layer im Modell
+//         ~Modelauto() {
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 delete layers[i];
+//             }
+//         }
+// };
