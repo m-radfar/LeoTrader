@@ -1,0 +1,3329 @@
+//+------------------------------------------------------------------+
+//|                                                    expertLEO.mq4 |
+//|                        Copyright 2021, MetaQuotes Software Corp. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2021, MetaQuotes Software Corp."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property strict
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+
+#include <stdlib.mqh>
+
+#define CLOSE_BUY 6
+#define CLOSE_SELL 7
+
+
+// --  Market Informationen
+datetime currentTime;
+double currentPrice;
+double pipValue= 0;
+double minStopLevel;
+double Spread=0;
+double lastAsk=0;
+double lastBid=0;
+double lots;
+double minLot;
+int vdigits  = 0;
+
+// -- Trade-Steuerungsparameter 
+double SecureVol;
+input double inpSecureVol = 190;
+datetime SecureVolUpdateTime;
+
+double dontSell_up;
+double dontSell_down;
+double dontBuy_up;
+double dontBuy_down;
+
+double m_buy_limit;
+double m_buy_stop;
+double m_sell_limit;
+double m_sell_stop;
+
+double m_buy_limit_small;
+double m_buy_stop_small;
+double m_sell_limit_small;
+double m_sell_stop_small;
+
+double buy_limit;
+double buy_stop;
+double sell_limit;
+double sell_stop;
+double atr;
+
+
+double fib_0;
+double fib_5;  // 100%
+bool look4Buy;
+bool look4Sell;
+
+
+// -- test Correlator-Verhältnise
+input bool correlatorTest=false;
+
+
+// -- Risikomanagement
+input double RiskRatio    =   0.02;
+input bool ROBOTTRADE = true;
+bool buyAllowed =true;
+bool sellAllowed =true;
+
+int MAGIC_NO    =   0;
+int userOrderTotal = 0;
+
+double dailyMaxRisk;
+double WeeklyMaxRisk;
+datetime weeklyTime;
+double totalRiskToday;
+double totalProfitToday;
+double totalRiskWeek;
+double totalProfitWeek;
+
+// -- Klassen und Strukturen
+//+------------------------------------------------------------------+
+//| Session Asia, Europe, USA price information                      |
+//+------------------------------------------------------------------+
+
+//--- Session-Zeiten (Server-Time) in Stunden -----------------------
+int sessionStartHour[3] = {23, 7, 15};  // Z_ASIA, Z_EURO, Z_USA
+int sessionEndHour  [3] = { 7,15, 23};
+
+//--- Zonen-Indizes und Bezeichnungen -------------------------------
+enum Zones { Z_ASIA=0, Z_EURO=1, Z_USA=2 };
+string zoneNames[3] = {"Asia","Europe","USA"};
+
+//--- Mögliche Alignments ------------------------------------
+enum ZoneAlignment {
+   ALL_ALIGN_BUY,               // alle drei Zonen in gleicher Richtung
+   TWO_DOM_ONE_CORR_BUY,        // zwei dominieren, eine ist Gegenkorrektur
+   ONE_DOM_TWO_CORR_BUY,        // eine dominiert, zwei sind Korrektur
+   ALL_ALIGN_SELL,              // alle drei Zonen in gleicher Richtung
+   TWO_DOM_ONE_CORR_SELL,       // zwei dominieren, eine ist Gegenkorrektur
+   ONE_DOM_TWO_CORR_SELL,       // eine dominiert, zwei sind Korrektur
+   NO_CLEAR_PATTERN             // kein klares Muster
+};
+
+//--- Phasen-Definitionen ------------------------------
+enum MovePhase {
+   PHASE_BUY,            // Impuls in Kaufrichtung
+   PHASE_CORR_IN_BUY,    // Korrektur innerhalb eines Kaufimpulses
+   PHASE_SELL,           // Impuls in Verkaufsrichtung
+   PHASE_CORR_IN_SELL,   // Korrektur innerhalb eines Verkaufsimpulses
+   PHASE_NEUTRAL         // neutral / unklar
+};
+
+//--- Struktur für eine Session ------------------------------------------------
+struct SessionData {
+    datetime start, end;            // Beginn/Ende der Session
+    double   open, high, low, close;// OHLC
+    int dir;
+    double average;
+    MovePhase phase;
+    ZoneAlignment alignment;
+};
+
+//--- Arrays für Sessions --------------------------------------------------------
+SessionData closedSessions[3][3];  // [Zone][0]=letzte, [1]=vorletzte, [2]=drittletzte
+SessionData activeSession;         // laufende Session
+int         activeZoneIndex;       // aktuell aktive Zone
+int         lastZoneIndex=-1;
+
+//+------------------------------------------------------------------+
+//| Session-Zeitpunkt-Berechnung                                      |
+//+------------------------------------------------------------------+
+datetime GetSessionStart(int zone, datetime t) {
+    int sh = sessionStartHour[zone];
+    int eh = sessionEndHour  [zone];
+    datetime day0 = StringToTime(TimeToString(t, TIME_DATE));
+    if(sh < eh) {
+        return day0 + sh*3600;
+    } else {
+        if(TimeHour(t) >= sh)
+            return day0 + sh*3600;
+        else
+            return day0 - 24*3600 + sh*3600;
+    }
+}
+
+datetime GetSessionEnd(int zone, datetime t) {
+    int sh = sessionStartHour[zone]; // 23, 7, 15
+    int eh = sessionEndHour  [zone]; // 7, 15, 23
+    datetime day0 = StringToTime(TimeToString(t, TIME_DATE));
+    if(sh < eh) {
+        return day0 + eh*3600;
+    } else {
+        if(TimeHour(t) >= sh)
+            return day0 + 24*3600 + eh*3600;
+        else
+            return day0 + eh*3600;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Ermittelt die gerade aktive Zone                                  |
+//+------------------------------------------------------------------+
+int GetActiveZone(datetime now) {
+    for(int z=0; z<3; z++) {
+        datetime s = GetSessionStart(z, now);
+        datetime e = GetSessionEnd  (z, now);
+        if(now >= s && now < e) return z;
+    }
+    return -1;
+}
+
+//+------------------------------------------------------------------+
+//| Richtung relativ zur vorherigen Zone ermitteln                    |
+//+------------------------------------------------------------------+
+int GetRelativeDirection(SessionData &prev, SessionData &curr)
+{
+   if(curr.average  > prev.average) return  1;
+   if(curr.average   < prev.average) return -1;
+   // sonst neutrale oder Korrektur-Phase
+   return 0;
+}
+
+double GetSessionAverage(SessionData &sess) {
+    return ((sess.high+sess.low+sess.close)/3);
+}
+
+//+------------------------------------------------------------------+
+//| Initialisierung: letzte 3 geschl. Sessions + laufende Session     |
+//+------------------------------------------------------------------+
+void InitSessionHistory() {
+    // letzte 3 geschlossene Sessions je Zone
+    for(int zone=0; zone<3; zone++) {
+        for(int k=0; k<3; k++) {
+            datetime end_k   = GetSessionEnd  (zone, currentTime - k*24*3600);
+            datetime start_k = GetSessionStart(zone, currentTime - k*24*3600);
+            closedSessions[zone][k].start = start_k;
+            closedSessions[zone][k].end   = end_k;
+            int i0 = iBarShift(Symbol(), PERIOD_H1, start_k, false);
+            int i1 = iBarShift(Symbol(), PERIOD_H1, end_k,   false);
+            if(i0>=0 && i1>=0 && i0<=i1) {
+                closedSessions[zone][k].open  = iOpen (Symbol(), PERIOD_H1, i0);
+                closedSessions[zone][k].close = iClose(Symbol(), PERIOD_H1, i1);
+                double hh=-1e9, ll=1e9;
+                for(int i=i0; i<=i1; i++) {
+                    hh = MathMax(hh, iHigh(Symbol(), PERIOD_H1, i));
+                    ll = MathMin(ll, iLow (Symbol(), PERIOD_H1, i));
+                }
+                closedSessions[zone][k].high = hh;
+                closedSessions[zone][k].low  = ll;
+            } else {
+                closedSessions[zone][k].open =
+                closedSessions[zone][k].high =
+                closedSessions[zone][k].low  =
+                closedSessions[zone][k].close = 0.0;
+            }
+            closedSessions[zone][k].average=GetSessionAverage(closedSessions[zone][k]);
+        }
+    }
+    // Initialisierung phase der geschlossene Sessions
+    closedSessions[0][2].phase = PHASE_NEUTRAL;
+    closedSessions[1][2].phase = PHASE_NEUTRAL;
+    closedSessions[2][2].phase = PHASE_NEUTRAL;
+
+    // laufende Session der aktiven Zone
+    activeZoneIndex = GetActiveZone(currentTime);
+
+
+    for(int zone=0; zone<3; zone++){
+        for(int k=2; k>=0; k--)
+            closedSessions[zone][k].dir=-100;
+    }
+
+    double av = (closedSessions[activeZoneIndex][2].high+closedSessions[activeZoneIndex][2].low)/2;
+    if(av<closedSessions[activeZoneIndex][2].close) closedSessions[activeZoneIndex][2].dir=1;
+    else if(av>=closedSessions[activeZoneIndex][2].close) closedSessions[activeZoneIndex][2].dir=-1;
+
+    for(int zone=0; zone<3; zone++){
+        for(int k=2; k>=0; k--){
+            if(closedSessions[zone][k].dir==-100){
+                SessionData curr = closedSessions[zone][k];
+                SessionData prev = (zone == 0) ? closedSessions[2][k+1] : closedSessions[zone-1][k];
+                closedSessions[zone][k].dir = GetRelativeDirection(prev, curr);
+            }
+        }
+    }
+
+    if(activeZoneIndex < 0) {
+        activeSession.start = activeSession.end = currentTime;
+        activeSession.open  =
+        activeSession.high  =
+        activeSession.low   =
+        activeSession.close = currentPrice;
+        return;
+    }
+
+    datetime s = GetSessionStart(activeZoneIndex, currentTime);
+    datetime e = GetSessionEnd  (activeZoneIndex, currentTime);
+    activeSession.start = s;
+    activeSession.end   = e;
+    int iO = iBarShift(Symbol(), PERIOD_H1, s, false);
+    double o = (iO>=0) ? iOpen(Symbol(), PERIOD_H1, iO) : currentPrice;
+    activeSession.open =
+    activeSession.high =
+    activeSession.low  =
+    activeSession.close= o;
+
+    AnalyzeZones();
+}
+
+//+------------------------------------------------------------------+
+//| Analyse der Zonen                                                 |
+//+------------------------------------------------------------------+
+void AnalyzeZones(void) {
+    // 1) Zähle Buy-/Sell-Signale
+    int countBuy=0, countSell=0;
+    double sum_buy=0, sum_sell=0;
+    for(int z=0; z<3; z++){
+            if(closedSessions[z][0].dir > 0) {
+                countBuy++;
+                sum_buy=+(closedSessions[z][0].high-closedSessions[z][0].average);
+            }
+            else if(closedSessions[z][0].dir < 0) {
+                countSell++;
+                sum_sell=+(closedSessions[z][0].average-closedSessions[z][0].low);
+            }
+    }
+
+    // 2) Alignment und übergeordnete Richtung
+    if(activeZoneIndex != lastZoneIndex){
+        if(countBuy == 3)                            activeSession.alignment = ALL_ALIGN_BUY;
+        else if(countSell == 3)                      activeSession.alignment = ALL_ALIGN_SELL;
+        else if(countBuy == 2 && sum_buy>sum_sell)   activeSession.alignment = TWO_DOM_ONE_CORR_BUY;
+        else if(countSell == 2 && sum_buy<sum_sell)  activeSession.alignment = TWO_DOM_ONE_CORR_SELL;
+        else if(countBuy == 1 && sum_buy>sum_sell)   activeSession.alignment = ONE_DOM_TWO_CORR_BUY;
+        else if(countSell == 1 && sum_buy<sum_sell)  activeSession.alignment = ONE_DOM_TWO_CORR_SELL;
+        else                                         activeSession.alignment = NO_CLEAR_PATTERN;
+    }
+
+    // Relativ-Logik: Impuls vs. Korrektur anhand prev→curr :contentReference[oaicite:3]{index=3}
+    if(ALL_ALIGN_BUY)               activeSession.phase = PHASE_BUY;
+    else if(ALL_ALIGN_SELL)         activeSession.phase = PHASE_SELL;
+    else if(TWO_DOM_ONE_CORR_BUY)   activeSession.phase = (activeSession.dir == 1) ? PHASE_BUY : PHASE_CORR_IN_BUY;
+    else if(TWO_DOM_ONE_CORR_SELL)  activeSession.phase = (activeSession.dir == -1) ? PHASE_SELL : PHASE_CORR_IN_SELL;
+    else if(ONE_DOM_TWO_CORR_BUY)   activeSession.phase = (activeSession.dir > 1) ? PHASE_BUY : PHASE_CORR_IN_BUY;
+    else if(ONE_DOM_TWO_CORR_SELL)  activeSession.phase = (activeSession.dir == -1) ? PHASE_SELL : PHASE_CORR_IN_SELL;
+    else activeSession.phase = PHASE_NEUTRAL;
+}
+
+//+------------------------------------------------------------------+
+//| Laufende Aktualisierung der aktiven Session                      |
+//+------------------------------------------------------------------+
+void UpdateSessionData() {
+    activeZoneIndex = GetActiveZone(currentTime);
+    if(activeZoneIndex < 0) return;
+    activeSession.start = GetSessionStart(activeZoneIndex, currentTime);
+    activeSession.end   = GetSessionEnd  (activeZoneIndex, currentTime);
+    SessionData prev = (activeZoneIndex == 0) ? closedSessions[2][0] : closedSessions[activeZoneIndex-1][0];
+    
+    if(lastZoneIndex != activeZoneIndex) {
+        
+        int iO = iBarShift(Symbol(), PERIOD_H1, activeSession.start, false);
+        if(lastZoneIndex>=0){
+            closedSessions[lastZoneIndex][2]=closedSessions[lastZoneIndex][1];
+            closedSessions[lastZoneIndex][1]=closedSessions[lastZoneIndex][0];
+            closedSessions[lastZoneIndex][0]=activeSession;
+        }
+
+        activeSession.open =
+        activeSession.high =
+        activeSession.low  =
+        activeSession.close= (iO>=0) ? iOpen(Symbol(), PERIOD_H1, iO) : currentPrice;
+        lastZoneIndex=activeZoneIndex;
+    }
+    activeSession.high  = MathMax(activeSession.high, currentPrice);
+    activeSession.low   = MathMin(activeSession.low,  currentPrice);
+    activeSession.close = currentPrice;
+    activeSession.average=GetSessionAverage(activeSession);
+    activeSession.dir=GetRelativeDirection(prev, activeSession);
+    AnalyzeZones();
+}
+
+//+------------------------------------------------------------------+
+//| Print-Funktion für alle Sessions                                 |
+//+------------------------------------------------------------------+
+void PrintAllSessionData() {
+    Print("===== Closed Sessions =====");
+    for(int zone=0; zone<3; zone++) {
+        PrintFormat("Zone %s:", zoneNames[zone]);
+        for(int k=0; k<3; k++) {
+            SessionData sd = closedSessions[zone][k];
+            PrintFormat("[%d] %s - %s  O=%.5f H=%.5f L=%.5f C=%.5f",
+                k,
+                TimeToString(sd.start,TIME_DATE|TIME_SECONDS),
+                TimeToString(sd.end,  TIME_DATE|TIME_SECONDS),
+                sd.open, sd.high, sd.low, sd.close
+            );
+        }
+    }
+    Print("===== Active Session =====");
+    PrintFormat("Zone %s: %s - %s  O=%.5f H=%.5f L=%.5f C=%.5f",
+        zoneNames[activeZoneIndex],
+        TimeToString(activeSession.start,TIME_DATE|TIME_SECONDS),
+        TimeToString(activeSession.end,  TIME_DATE|TIME_SECONDS),
+        activeSession.open,
+        activeSession.high,
+        activeSession.low,
+        activeSession.close
+    );
+}
+
+
+
+//+------------------------------------------------------------------+
+//| LeoSensors                                                       |
+//+------------------------------------------------------------------+
+class LeoSensors{
+  private:
+    // private Methode
+    void zigFibos(void);
+    void TrendAnalysis(void);
+    void updateCandelRS(void);
+    char evaluateSto(void);
+
+
+    string ZigMethod;
+    int MyZigUpdateBar;
+    int continuesBar;
+    void updateMyZigHistory(void);
+    int MA_TREND_PERIOD;
+    int MA_CUT_PERIOD;
+    int MyZig_Bar[50];
+
+    
+
+  public:
+    // public Methode
+      void init_Leo(int, string, int, int);
+      void updateLeo(void);
+
+    // zigzag variable
+      double MyZig[10];
+      double MyZig_Low[10];
+      double MyZig_High[10];
+
+      double ZigLen[2];
+      double smalZigStep; //bigZigStep = SRLength; //
+      double MyZigLawn;
+      double MyZigPeak;
+      int MyZig_Interval[9];
+
+
+    double upperBearCandidates[5];
+    double lowerBullCandidates[5];
+
+
+    double MyZig_0;
+    char DirectionSign;
+    int MaUpdateBar;
+    int timeframe;
+
+    bool zigTrendBuy;
+    bool zigTrendSell;
+
+    bool zigBuy;
+    bool zigSell;
+    bool zigCorrInBuy;
+    bool zigCorrInSell;
+    bool aktivZigFlipLine[4];
+    bool flactuationZig;
+    bool zigFlactuationEdge;
+
+    bool continues;
+    
+    
+    long buyVol[10];
+    long sellVol[10];
+
+    double MA_Trend[5];
+    double MA_Cut[5];
+
+    double MACD_Sig[5];
+    double MACD_Main[5];
+
+    int MACD_Trend;
+
+    double atr;
+
+    // fibo_candel  double R5, R4, R3, R2, R1, PP, S1, S2, S3, S4, S5;
+    double fibo_candel[16]; // incrementall 0:S5, 1:S4, 2:S3, 3:S2, 4:S1, 5:R1, 6:R2, 7:R3, 8:R4, 9:R5
+    double support_candel;
+    double resistance_candel;
+    uchar supFibLev_candel;
+    uchar resFibLev_candel;
+    double lastFibLevValue_candel;
+    double SRLength_candel;
+    double AktiveFibUp_candel;
+    double AktiveFibDown_candel;
+    double fiboHUp;
+    double fiboHDown;
+    double fiboGUp;
+    double fiboGDown;
+    bool FibLineAktive_candel;
+    bool trendBuyFib_candel;
+    bool trendSellFib_candel;
+    bool FibHalfLineAktive_candel;
+    uchar aktiveFibLev_candel;
+    bool fibTrendSwitch_candel;
+    uchar trendBuyFibQty_candel;
+    uchar trendSellFibQty_candel;
+    double trendBuyFibLength_candel;
+    double trendSellFibLength_candel;
+    double fiboFlip2BuyValue_candel;
+    double fiboFlip2SellValue_candel;
+    uchar fiboFlip2BuyCnt_candel[20];
+    uchar fiboFlip2SellCnt_candel[20];
+    double lastFiboFlip2BuyValue_candel[20];
+    double lastFiboFlip2SellValue_candel[20];
+    
+    
+    // Zigzag Fibo
+    double AllFibo[18];       // incremental all Fibo always with 19 levels
+    double AktiveFibUp;
+    double AktiveFibDown;
+    bool FibLineAktive;
+    bool FibHalfLineAktive;
+    bool trendBuyFib;
+    bool trendSellFib;
+    bool fibTrendSwitch;
+    uchar trendBuyFibQty;
+    uchar trendSellFibQty;
+    double trendBuyFibLength;
+    double trendSellFibLength;
+    
+    double support;
+    double resistance;
+
+    uchar aktiveFibLev;
+    uchar supFibLev;
+    uchar resFibLev;
+    double lastFibLevValue;
+    double fiboFlip2BuyValue;
+    double fiboFlip2SellValue;
+    uchar fiboFlip2BuyCnt[5];
+    uchar fiboFlip2SellCnt[5];
+    double lastFiboFlip2BuyValue[5];
+    double lastFiboFlip2SellValue[5];
+      
+    double SRLength; //bigZigStep
+
+
+    double stoch[20];
+    double stochSigRed[20];
+
+
+    bool StoBuy;                  // rewritabel to true if it was clear due to noisy sto 
+    bool StoSell;                 // rewritabel to true if it was clear due to noisy sto
+
+
+    double AveVol;
+    double stoRange;
+
+    long volume[8];
+
+};
+
+    void LeoSensors::updateMyZigHistory(void)
+    {
+        int i = 1;
+        int shift=1;
+        for(uchar j=1; j<ArraySize(MyZig); j++)
+        {
+            do{
+                if (ZigMethod=="MyZigZag") MyZig[j]=iCustom(Symbol(), timeframe, "MyZigZag",6, 0, shift);
+                else MyZig[j]=iCustom(Symbol(), timeframe, "ZigZag", 12, 5, 3, 0, shift);
+                shift++;
+                i++;
+            }while (MyZig[j]==0);
+
+            MyZig_Bar[j]=shift-1;
+                
+            MyZig_Interval[j-1]=i-1;
+            i=1;
+        }
+
+        // recalculte if ZigZag's Points are truely marked
+        for(uchar j=2; j<ArraySize(MyZig); j++) {
+            if((MyZig[j-2]>MyZig[j-1] && MyZig[j-1]>MyZig[j])
+                ||(MyZig[j-2]>0 && MyZig[j-2]<MyZig[j-1] && MyZig[j-1]<MyZig[j]))
+            {
+                MyZig[j-1]=MyZig[j];
+                MyZig_Bar[j-1]=MyZig_Bar[j];
+                MyZig_Interval[j-2]+=MyZig_Interval[j-1];
+                for(uchar k=j; k<ArraySize(MyZig_Interval)-1; k++){
+                    MyZig[k]=MyZig[k+1];
+                    MyZig_Bar[k]=MyZig_Bar[k+1];
+                    MyZig_Interval[k-1]=MyZig_Interval[k];
+                }
+            }
+        }
+        // extract extra high and lows:
+        shift = 0;
+        for(uchar j=0; j<ArraySize(MyZig_High); j++)
+        {
+            do{
+                if (ZigMethod=="MyZigZag") MyZig_High[j]=iCustom(Symbol(), timeframe, "MyZigZag",6, 1, shift);
+                else MyZig_High[j]=iCustom(Symbol(), timeframe, "ZigZag", 12, 5, 3, 1, shift);
+                shift++;
+            }while (MyZig_High[j]==0);
+        }
+
+        shift = 0;
+        for(uchar j=0; j<ArraySize(MyZig_Low); j++){
+            do{
+                if (ZigMethod=="MyZigZag") MyZig_Low[j]=iCustom(Symbol(), timeframe, "MyZigZag",6, 2, shift);
+                else MyZig_Low[j]=iCustom(Symbol(), timeframe, "ZigZag", 12, 5, 3, 2, shift);
+                shift++;
+            }while (MyZig_Low[j]==0);
+        }
+    }
+
+    void LeoSensors::updateCandelRS(void)
+    {
+        double high_1 = iHigh(Symbol(), timeframe, 1);
+        double low_1 = iLow(Symbol(), timeframe, 1);
+        double close_1 = iClose(Symbol(), timeframe, 1);
+
+        double PP = (high_1 + low_1 + close_1)/3;
+        SRLength_candel=(high_1 - low_1);
+        fibo_candel[15] = PP + (SRLength_candel * 17.944);
+        fibo_candel[14] = PP + (SRLength_candel * 11.09);
+        fibo_candel[13] = PP + (SRLength_candel * 6.854);
+        fibo_candel[12] = PP + (SRLength_candel * 4.236);
+        fibo_candel[11] = PP + (SRLength_candel * 2.618);
+        fibo_candel[10] = PP + (SRLength_candel * 1.618);
+        fibo_candel[9] = PP + SRLength_candel;
+        fibo_candel[8] = PP + (SRLength_candel * 0.618);
+        fibo_candel[7] = PP - (SRLength_candel * 0.618);
+        fibo_candel[6] = PP - SRLength_candel;
+        fibo_candel[5] = PP - (SRLength_candel * 1.618);
+        fibo_candel[4] = PP - (SRLength_candel * 2.618);
+        fibo_candel[3] = PP - (SRLength_candel * 4.236);
+        fibo_candel[2] = PP - (SRLength_candel * 6.854);
+        fibo_candel[1] = PP - (SRLength_candel * 11.09);
+        fibo_candel[0] = PP - (SRLength_candel * 17.944);
+    }
+
+    void LeoSensors::zigFibos(void)
+    {
+        ZigLen[0]=MathAbs(MyZig[2]-MyZig[1]);
+        ZigLen[1]=MathAbs(MyZig[2]-MyZig[3]);
+
+        // definition of reference points in ZigZag from left to rigth
+        int firstPoint=2;
+        int secondPoint=1;
+
+        if(MyZig[0]==0){
+            firstPoint=3;
+            secondPoint=2;
+            ZigLen[0]=MathAbs(MyZig[2]-MyZig[3]);
+            ZigLen[1]=MathAbs(MyZig[4]-MyZig[3]);
+        }
+
+        if(ZigLen[0]>ZigLen[1]){
+            smalZigStep=ZigLen[1];
+        }
+        else{
+            smalZigStep=ZigLen[0];
+        }
+
+        double fibLen=MathAbs(MyZig[secondPoint]-MyZig[firstPoint]);
+
+
+        SRLength = fibLen;   
+        // if (timeframe == PERIOD_M5){
+        //   if(ZigLen[0]>ZigLen[1] && AllFibo[0]>0 && (currentPrice>AllFibo[13] || currentPrice<AllFibo[4]))
+        //     SRLength = fibLen = MathAbs(smalZigStep);
+        // }
+        
+        MyZigLawn=MyZig[firstPoint];
+        MyZigPeak=MyZig[secondPoint];
+
+        if(MyZigLawn>MyZigPeak){
+            MyZigLawn=MyZig[secondPoint];
+            MyZigPeak=MyZig[firstPoint];
+        }
+
+        // fibo rechner
+        AllFibo[0] = MyZigPeak-(17.944*fibLen);
+        AllFibo[1] = MyZigPeak-(11.09*fibLen);
+        AllFibo[2] = MyZigPeak-(6.854*fibLen);
+        AllFibo[3] = MyZigPeak-(4.236*fibLen);
+        AllFibo[4] = MyZigPeak-(2.618*fibLen);
+        AllFibo[5] = MyZigPeak-(1.618*fibLen);
+        AllFibo[6] = MyZigLawn; // LDown
+        AllFibo[7] = MyZigLawn+(0.236*fibLen);
+        AllFibo[8] = MyZigPeak-(0.618*fibLen);
+        // AllFibo[9] = MyZigPeak-(0.5*fibLen); // 50%
+        AllFibo[9]= MyZigPeak-(0.382*fibLen);
+        AllFibo[10]= MyZigPeak-(0.236*fibLen);
+        AllFibo[11]= MyZigPeak; // LTop
+        AllFibo[12]= MyZigLawn+(1.618*fibLen);
+        AllFibo[13]= MyZigLawn+(2.618*fibLen);
+        AllFibo[14]= MyZigLawn+(4.236*fibLen);
+        AllFibo[15]= MyZigLawn+(6.854*fibLen);
+        AllFibo[16]= MyZigLawn+(11.09*fibLen);
+        AllFibo[17]= MyZigLawn+(17.944*fibLen); 
+        
+    
+    }
+
+    char LeoSensors::evaluateSto(){
+        char ret='A';
+        // if(((!StoBuy && (stoch[0]-stoRange)>stochSigRed[0]) || (StoBuy && ((stoch[0]-(0.2*stoRange))>stochSigRed[0])))
+        // && (stochSigRed[0]>stochSigRed[1] || (stoch[0]>stoch[1] && stoch[0]>stochSigRed[1]))) 
+        if(stoch[0]>stochSigRed[0]){
+            StoBuy=true;
+            StoSell=false;
+            ret='B';
+        }
+        // else if (((!StoSell && (stoch[0]+stoRange)<stochSigRed[0]) || (StoSell && ((stoch[0]+(0.2*stoRange))<stochSigRed[0])))
+        // && (stochSigRed[0]<stochSigRed[1] || (stoch[0]<stoch[1] && stoch[0]<stochSigRed[1]))) 
+        else if(stoch[0]<stochSigRed[0]){
+            StoSell=true;
+            StoBuy=false;
+            ret='S';
+        }
+        return ret;
+    }
+
+                           
+    void LeoSensors::TrendAnalysis(void)
+    {
+        
+        // MA and stoch Analysis:
+        // -----------
+        char evSt = evaluateSto();
+
+        // MACD Analysis:
+        // ---------------
+
+        if(MACD_Main[1]>MACD_Sig[1] && MACD_Main[0]<MACD_Sig[0]){
+            if(MACD_Sig[0]>0) MACD_Trend=-4;
+            else if(MACD_Sig[0]<0) MACD_Trend=-3;
+        } 
+        else if(MACD_Main[1]<MACD_Sig[1] && MACD_Main[0]<MACD_Sig[0]){
+            if(MACD_Sig[0]>0) MACD_Trend=-2;
+            else if(MACD_Sig[0]<0) MACD_Trend=-1;
+        }
+        else if(MACD_Main[1]>MACD_Sig[1] && MACD_Main[0]>MACD_Sig[0]){
+            if(MACD_Sig[0]>0) MACD_Trend=1;
+            else if(MACD_Sig[0]<0) MACD_Trend=2;
+        } 
+        else if(MACD_Main[1]<MACD_Sig[1] && MACD_Main[0]>MACD_Sig[0]){
+            if(MACD_Sig[0]<0) MACD_Trend=4;
+            else if(MACD_Sig[0]>0) MACD_Trend=3;
+        }
+        
+
+        // Zig Evaluation:
+        // ---------------
+        if(ZigMethod!=""){
+            zigTrendBuy=false;
+            zigTrendSell=false;
+
+            zigBuy=false;
+            zigSell=false;
+            zigCorrInBuy=false;
+            zigCorrInSell=false;
+
+
+            // evaluate zigTrend
+            // Zig-Buy
+            // buy and corrInBuy
+            if(MyZig[0]>MyZig[1]) {
+                zigBuy=true;
+                if(MyZig[0]-MyZig[1]>MyZig[2]-MyZig[1])zigTrendBuy = true;
+                else if(MyZig[2]-MyZig[1]<MyZig[2]-MyZig[3])zigTrendBuy = true;
+                else zigTrendSell = true; 
+            }
+            else if(MyZig[0]==0 && MyZig[1]>MyZig[2]) {
+                zigCorrInBuy=true;
+                if(MyZig[1]-MyZig[2]>MyZig[3]-MyZig[2])zigTrendBuy = true;
+                else if(MyZig[3]-MyZig[2]<MyZig[3]-MyZig[4])zigTrendBuy = true;
+                else zigTrendSell = true; 
+            }
+
+            // Zig-sell
+            // sell and corrInSell
+            else if(MyZig[0]>0 && MyZig[0]< MyZig[1]) {
+                zigSell=true;
+                if(MyZig[1]-MyZig[0]>MyZig[1]-MyZig[2])zigTrendSell = true;
+                else if(MyZig[1]-MyZig[2]>MyZig[3]-MyZig[2])zigTrendBuy = true;
+                else zigTrendSell = true; 
+            }
+            else if(MyZig[0]==0 && MyZig[1]<MyZig[2]) {
+                zigCorrInSell=true;
+                if(MyZig[2]-MyZig[1]>MyZig[2]-MyZig[3])zigTrendSell = true; 
+                else if(MyZig[2]-MyZig[3]>MyZig[4]-MyZig[3])zigTrendBuy = true;
+                else zigTrendSell = true; 
+            }
+
+
+            
+            //FIBO Analysis ################################################################
+            if (lastFibLevValue>0 && aktiveFibLev<100 && lastFibLevValue<AllFibo[aktiveFibLev]){
+                if(trendSellFib){   // check if trend switched
+                    fibTrendSwitch=true;
+                    fiboFlip2BuyValue = lastFibLevValue;
+                    trendBuyFibQty=1;
+                    trendBuyFibLength=AllFibo[aktiveFibLev]-lastFibLevValue;
+                }
+                else {
+                    trendBuyFibLength+=(AllFibo[aktiveFibLev]-lastFibLevValue);
+                    trendBuyFibQty++;
+                    fibTrendSwitch = false;
+                } 
+                trendBuyFib=true;
+                trendSellFib=false;
+                lastFibLevValue=AllFibo[aktiveFibLev];
+            }
+            else if (lastFibLevValue>0 && aktiveFibLev<100 && lastFibLevValue>AllFibo[aktiveFibLev]){
+                if(trendBuyFib){    // check if trend switched
+                    fibTrendSwitch=true;
+                    fiboFlip2SellValue = lastFibLevValue;
+                    trendSellFibQty=1;
+                    trendSellFibLength=lastFibLevValue-AllFibo[aktiveFibLev];
+                }
+                else { 
+                    fibTrendSwitch = false;
+                    trendSellFibQty++;
+                    trendSellFibLength+=(lastFibLevValue-AllFibo[aktiveFibLev]);
+                }
+                trendBuyFib=false;
+                trendSellFib=true;
+                lastFibLevValue=AllFibo[aktiveFibLev];
+            }
+            else if (lastFibLevValue==0){ // initial lastFibLevValue just at first time
+                lastFibLevValue=currentPrice;
+            }
+            else{
+                if(iHigh(Symbol(), timeframe, 0)>upperBearCandidates[0])
+                    upperBearCandidates[0]=iHigh(Symbol(), timeframe, 0);
+                if((iLow(Symbol(), timeframe, 0)<lowerBullCandidates[0]) || (lowerBullCandidates[0]==0))
+                    lowerBullCandidates[0] = iLow(Symbol(), timeframe, 0); 
+            }
+
+            // Fibo flip regions
+            // check if flip regions changed
+            if(fibTrendSwitch){
+                if(lastFiboFlip2BuyValue[0]!=fiboFlip2BuyValue){
+                    for(uchar i=(uchar)(ArraySize(lastFiboFlip2BuyValue)-1); i>0; i--){
+                        lastFiboFlip2BuyValue[i]=lastFiboFlip2BuyValue[i-1];
+                        fiboFlip2BuyCnt[i]=fiboFlip2BuyCnt[i-1];
+                        upperBearCandidates[i]=upperBearCandidates[i-1];
+                        lowerBullCandidates[i]=lowerBullCandidates[i-1];
+                    }
+                    lastFiboFlip2BuyValue[0]=fiboFlip2BuyValue;
+                    fiboFlip2BuyCnt[0]=1;
+                }
+                else if (lastFiboFlip2SellValue[0]!=fiboFlip2SellValue){
+                    for(uchar i=(uchar)(ArraySize(lastFiboFlip2SellValue)-1); i>0; i--){
+                        lastFiboFlip2SellValue[i]=lastFiboFlip2SellValue[i-1];
+                        fiboFlip2SellCnt[i]=fiboFlip2SellCnt[i-1];
+                        upperBearCandidates[i]=upperBearCandidates[i-1];
+                        lowerBullCandidates[i]=lowerBullCandidates[i-1];
+                    }
+                    lastFiboFlip2SellValue[0]=fiboFlip2SellValue;
+                    fiboFlip2SellCnt[0]=1;
+                }
+                else if(aktiveFibLev<100 && AllFibo[aktiveFibLev]==lastFiboFlip2BuyValue[0]){
+                    fiboFlip2BuyCnt[0]+=1;
+                }
+                else if(aktiveFibLev<100 && AllFibo[aktiveFibLev]==lastFiboFlip2SellValue[0]){
+                    fiboFlip2BuyCnt[0]+=1;
+                }
+            }
+
+
+            
+            // Zig flip regions
+            double flipRegionLength=smalZigStep*0.25;
+            uchar aktivFlipregion=0;
+            
+            aktivZigFlipLine[3]=false;
+            aktivZigFlipLine[2]=false;
+            aktivZigFlipLine[1]=false;
+            aktivZigFlipLine[0]=false;
+
+            if((flipRegionLength*4) >= (SRLength*0.93)) flactuationZig=true;
+            else flactuationZig=false;
+
+            if ((currentPrice < (MyZigPeak+smalZigStep+flipRegionLength)) && (currentPrice>(MyZigPeak+smalZigStep-flipRegionLength))) {
+            aktivFlipregion++;
+            aktivZigFlipLine[3]=true;
+            }
+
+            if ((currentPrice < (MyZigPeak-smalZigStep+flipRegionLength)) && (currentPrice>(MyZigPeak-smalZigStep-flipRegionLength))) {
+            aktivFlipregion++;
+            aktivZigFlipLine[2]=true;
+            }
+
+            if ((currentPrice < (MyZigLawn+smalZigStep+flipRegionLength)) && (currentPrice>(MyZigLawn+smalZigStep-flipRegionLength))) {
+            aktivFlipregion++;
+            aktivZigFlipLine[1]=true;
+            }
+
+            if ((currentPrice < (MyZigLawn-smalZigStep+flipRegionLength)) && (currentPrice>(MyZigLawn-smalZigStep-flipRegionLength))) {
+            aktivFlipregion++;
+            aktivZigFlipLine[0]=true;
+            }
+
+            if (flactuationZig && (currentPrice>(MyZigPeak+flipRegionLength))) zigFlactuationEdge = true;
+            else zigFlactuationEdge = false;
+
+        }
+
+        // Candel Evaluation:
+        // ---------------
+        if (lastFibLevValue_candel>0 && aktiveFibLev_candel<100 && lastFibLevValue_candel<fibo_candel[aktiveFibLev_candel]){
+            if(trendSellFib_candel){ // check if trend switched
+                fibTrendSwitch_candel=true;
+                fiboFlip2BuyValue_candel = lastFibLevValue_candel;
+                trendBuyFibQty_candel=1;
+                trendBuyFibLength_candel=fibo_candel[aktiveFibLev_candel]-lastFibLevValue_candel;
+            }
+            else{
+                trendBuyFibLength_candel+=(fibo_candel[aktiveFibLev_candel]-lastFibLevValue_candel);
+                trendBuyFibQty_candel++;
+                fibTrendSwitch_candel = false;
+            }
+            trendBuyFib_candel=true;
+            trendSellFib_candel=false;
+            lastFibLevValue_candel=fibo_candel[aktiveFibLev_candel];
+        }
+        else if(lastFibLevValue_candel>0 && aktiveFibLev_candel<100 && lastFibLevValue_candel>fibo_candel[aktiveFibLev_candel]){
+            if(trendBuyFib_candel){    // check if trend switched
+                fibTrendSwitch_candel=true;
+                fiboFlip2SellValue_candel = lastFibLevValue_candel;
+                trendSellFibQty_candel=1;
+                trendSellFibLength_candel=lastFibLevValue_candel-fibo_candel[aktiveFibLev_candel];
+            }
+            else { 
+                fibTrendSwitch_candel = false;
+                trendSellFibQty_candel++;
+                trendSellFibLength_candel+=(lastFibLevValue_candel-fibo_candel[aktiveFibLev_candel]);
+            }
+            trendBuyFib_candel=false;
+            trendSellFib_candel=true;
+            lastFibLevValue_candel=fibo_candel[aktiveFibLev_candel];
+        }
+        else if(lastFibLevValue_candel==0) lastFibLevValue_candel=currentPrice;
+
+        // Fibo flip regions
+        // check if flip regions changed
+        if(fibTrendSwitch_candel){
+            if(lastFiboFlip2BuyValue_candel[0]!=fiboFlip2BuyValue_candel){
+                for(uchar i=(uchar)(ArraySize(lastFiboFlip2BuyValue_candel)-1); i>0; i--){
+                lastFiboFlip2BuyValue_candel[i]=lastFiboFlip2BuyValue_candel[i-1];
+                fiboFlip2BuyCnt_candel[i]=fiboFlip2BuyCnt_candel[i-1];
+                }
+                lastFiboFlip2BuyValue_candel[0]=fiboFlip2BuyValue_candel;
+                fiboFlip2BuyCnt_candel[0]=1;
+            }
+            else if (lastFiboFlip2SellValue_candel[0]!=fiboFlip2SellValue_candel){
+                for(uchar i=(uchar)(ArraySize(lastFiboFlip2SellValue_candel)-1); i>0; i--){
+                lastFiboFlip2SellValue_candel[i]=lastFiboFlip2SellValue_candel[i-1];
+                fiboFlip2SellCnt_candel[i]=fiboFlip2SellCnt_candel[i-1];
+                }
+                lastFiboFlip2SellValue_candel[0]=fiboFlip2SellValue_candel;
+                fiboFlip2SellCnt_candel[0]=1;
+            }
+            else if(aktiveFibLev_candel<100 && fibo_candel[aktiveFibLev_candel]==lastFiboFlip2BuyValue_candel[0]){
+                fiboFlip2BuyCnt_candel[0]+=1;
+            }
+            else if(aktiveFibLev_candel<100 && fibo_candel[aktiveFibLev_candel]==lastFiboFlip2SellValue_candel[0]){
+                fiboFlip2BuyCnt_candel[0]+=1;
+            }
+        }
+        
+    }
+
+    void LeoSensors::init_Leo(int tf, string zm, int trend, int cut)
+    {
+        ZigMethod=zm;
+        timeframe=tf;
+
+        MA_TREND_PERIOD=trend;
+        MA_CUT_PERIOD=cut;
+
+        MyZigUpdateBar=iBars(Symbol(), timeframe);
+        if(zm!=""){
+            updateMyZigHistory();
+            zigFibos();       // update Fibo Levels by start
+            lastFibLevValue=0; // invalid fibo level value
+        }
+        lastFibLevValue_candel=0;
+    }
+
+    void LeoSensors::updateLeo(void)
+    {
+        double div=0;
+        double tmpZZ=0;
+        MyZig_0=MyZig[0];
+        if(ZigMethod=="MyZigZag" || ZigMethod=="ZigZag"){
+
+        if (ZigMethod=="MyZigZag") tmpZZ=iCustom(Symbol(), timeframe, "MyZigZag",6, 0, 0);
+        else tmpZZ=iCustom(Symbol(), timeframe, "ZigZag", 12, 5, 3, 0, 0);
+
+        bool UpdateFiboSR=false;
+        if(tmpZZ>0 && (tmpZZ>MyZig[0]||tmpZZ<MyZig[0]))UpdateFiboSR=true;
+    
+        
+        if(MyZigUpdateBar!=iBars(Symbol(), timeframe) || (tmpZZ!=MyZig[0])){
+            MyZigUpdateBar=iBars(Symbol(), timeframe);
+            MyZig[0]=tmpZZ;
+            updateMyZigHistory();
+            if(UpdateFiboSR)zigFibos();    // update Fibo Levels
+        }
+        
+        if(tmpZZ>0 && ((tmpZZ>MyZig[1]) || (tmpZZ>MyZig_0 && MyZig_0>0))) DirectionSign='+';
+        else if(tmpZZ>0 && ((tmpZZ<MyZig[1]) || (tmpZZ<MyZig_0 && MyZig_0>0))) DirectionSign='-';
+        else DirectionSign='k';
+        }
+        
+        if(MaUpdateBar==iBars(Symbol(),timeframe)){
+            volume[0]=iVolume(Symbol(), timeframe, 0);
+
+            // update MACD history
+            MACD_Main[0]=iMACD(Symbol(), timeframe, 12, 26, 9, PRICE_CLOSE, MODE_MAIN, 0);
+            MACD_Sig[0]=iMACD(Symbol(), timeframe, 12, 26, 9, PRICE_CLOSE, MODE_SIGNAL, 0);
+            
+            MA_Trend[0]=iMA(Symbol(), timeframe, MA_TREND_PERIOD, 0, MODE_LWMA, PRICE_WEIGHTED, 0);
+            MA_Cut[0]=iMA(Symbol(), timeframe, MA_CUT_PERIOD, 0, MODE_LWMA, PRICE_WEIGHTED, 0);
+            
+            // update buyVol & sellVol
+            if(Ask>lastAsk){
+                buyVol[0]=iVolume(Symbol(), timeframe, 0)-volume[0];
+            }
+            if(Bid<lastBid){
+                sellVol[0]=iVolume(Symbol(), timeframe, 0)-volume[0];
+            }
+
+            // update stochastic
+            stoch[0]=iStochastic(Symbol(),timeframe,5,3,3,MODE_SMA,0,MODE_MAIN,0);
+            stochSigRed[0]=iStochastic(Symbol(),timeframe,5,3,3,MODE_SMA,0,MODE_SIGNAL,0);
+
+            if(!continues && MaUpdateBar>continuesBar+1) continues=true;
+            //   update_dps_dvs(false);     
+        }
+        else{ // new Bar
+            MaUpdateBar=iBars(Symbol(), timeframe);
+            updateCandelRS();
+
+            // update MACD history
+            for (uchar shift=0; shift<ArraySize(MACD_Main); shift++){
+                MACD_Main[shift]=iMACD(Symbol(), timeframe, 12, 26, 9, PRICE_CLOSE, MODE_MAIN, shift);
+                MACD_Sig[shift]=iMACD(Symbol(), timeframe, 12, 26, 9, PRICE_CLOSE, MODE_SIGNAL, shift);
+            }
+            
+            
+            for (uchar shift=0; shift<ArraySize(MA_Trend); shift++){
+                MA_Trend[shift]=iMA(Symbol(), timeframe, MA_TREND_PERIOD, 0, MODE_LWMA, PRICE_WEIGHTED, shift);
+                MA_Cut[shift]=iMA(Symbol(), timeframe, MA_CUT_PERIOD, 0, MODE_LWMA, PRICE_WEIGHTED, shift); 
+            }
+
+            // update buyVol & sellVol
+            
+            for(uchar i=1; i<ArraySize(buyVol);i++){
+                buyVol[i]=buyVol[i-1];
+                sellVol[i]=sellVol[i-1];
+            }
+
+            
+            // volume
+            for (int shift=0; shift < ArraySize(volume); shift++){
+                volume[shift]=iVolume(Symbol(), timeframe, shift);
+            }
+
+            // update stochastic
+            for (int shift=0; shift < ArraySize(stoch); shift++){
+                stoch[shift]=iStochastic(Symbol(),timeframe,5,3,3,MODE_SMA,0,MODE_MAIN,shift);
+                stochSigRed[shift]=iStochastic(Symbol(),timeframe,5,3,3,MODE_SMA,0,MODE_SIGNAL,shift);
+            }
+            
+            if(continues){
+                double openDif=MathAbs(iOpen(Symbol(), timeframe, 0)-iClose(Symbol(), timeframe, 1));
+                double secureRange=(iHigh(Symbol(), timeframe, 1)-iLow(Symbol(), timeframe, 1))/3;
+                continues=false;
+                if(openDif<secureRange) continues=true;
+                continuesBar=MaUpdateBar;
+            }
+
+            for (uchar i=1; i<ArraySize(stoch); i++){
+                stoRange+=MathAbs(stoch[i]-stochSigRed[i]);
+            }
+            stoRange/=(ArraySize(stoch)-1);
+            stoRange*=0.4;
+
+            AveVol=(double)(volume[1]+volume[2]+volume[3]+volume[4])/4;
+            
+        } 
+
+        atr = iATR(Symbol(), timeframe, 14, 0);
+
+        // finding related Fibo index pairs (de/increasing) to current price
+
+        //##############################################
+        //          FIBO-Evaluation (Support/Resistance)
+        //##############################################
+        
+        support=0;
+        resistance=0;
+        supFibLev=0;
+        resFibLev=0;
+
+        AktiveFibUp=0;
+        AktiveFibDown=0;
+        FibLineAktive=false;
+        FibHalfLineAktive=false;
+
+        aktiveFibLev=100;
+        
+        for(uchar i=1; i<17; i++){
+            double lowerRef = AllFibo[i]-AllFibo[i-1];
+            double uperRef = AllFibo[i+1]-AllFibo[i];
+            
+            double GUp=AllFibo[i]+(0.15*uperRef);
+            double GDown=AllFibo[i]-(0.15*lowerRef);
+
+            fiboHUp=AllFibo[i]+(0.25*uperRef);
+            fiboHDown=AllFibo[i]-(0.25*lowerRef);
+
+            if(currentPrice<GUp && currentPrice>GDown){
+                AktiveFibUp=GUp;
+                AktiveFibDown=GDown;
+                aktiveFibLev=i;
+                supFibLev=i-1;
+                resFibLev=i+1;
+                support=AllFibo[supFibLev];
+                resistance=AllFibo[resFibLev];
+                FibLineAktive=true;
+                break;
+            }
+            else if(currentPrice<=fiboHUp && currentPrice>=fiboHDown){
+                supFibLev=i-1;
+                resFibLev=i;
+                support=AllFibo[supFibLev];
+                resistance=AllFibo[resFibLev];
+                FibHalfLineAktive=true;
+                break;
+            }
+        }
+
+        // candel Analysis/Evaluation:
+        // ---------------
+        support_candel=0;
+        resistance_candel=0;
+        supFibLev_candel=0;
+        resFibLev_candel=0;
+        
+        AktiveFibUp_candel=0;
+        AktiveFibDown_candel=0;
+        FibLineAktive_candel=false;
+        FibHalfLineAktive_candel=false;
+
+        aktiveFibLev_candel=100;
+
+        for(uchar i=1; i<ArraySize(fibo_candel)-1; i++){
+            double lowerRef = fibo_candel[i]-fibo_candel[i-1];
+            double uperRef = fibo_candel[i+1]-fibo_candel[i];
+            
+            double GUp=fibo_candel[i]+(0.15*uperRef);
+            double GDown=fibo_candel[i]-(0.15*lowerRef);
+
+            double HUp=fibo_candel[i]+(0.25*uperRef);
+            double HDown=fibo_candel[i]-(0.25*lowerRef);
+            if(currentPrice<GUp && currentPrice>GDown){
+                AktiveFibUp_candel=GUp;
+                AktiveFibDown_candel=GDown;
+                supFibLev_candel=i-1;
+                resFibLev_candel=i+1;
+                aktiveFibLev_candel=i;
+                support_candel=fibo_candel[supFibLev_candel];
+                resistance_candel=fibo_candel[resFibLev_candel];
+                FibLineAktive_candel=true;
+                break;
+            }
+            else if(currentPrice<=HUp && currentPrice>=HDown){
+                supFibLev_candel=i-1;
+                resFibLev_candel=i;
+                support_candel=fibo_candel[supFibLev_candel];
+                resistance_candel=fibo_candel[resFibLev_candel];
+                FibHalfLineAktive_candel=true;
+                break;
+            }
+
+        }
+        
+        TrendAnalysis();
+    }
+
+
+LeoSensors LS_H4, LS_H1, LS_M30, LS_M15, LS_M5;
+
+//+------------------------------------------------------------------+
+//| Wave                                                             |
+//+------------------------------------------------------------------+
+struct Wave {
+    bool isBuyWave;        // True, wenn es eine Kaufwelle ist
+    bool isSellWave;       // True, wenn es eine Verkaufwelle ist
+ 
+    double startPrice;
+    double endPrice;
+
+    double dp;
+
+    datetime startTime;    // Zeitstempel für den Beginn der Welle
+    datetime endTime;      // Zeitstempel für das Ende der Welle
+};
+
+
+//+------------------------------------------------------------------+
+//| Correlator                                                       |
+//+------------------------------------------------------------------+
+class Correlator {
+	private:
+		void setStoWave(LeoSensors &sensor, Wave &storeArr[]);
+		void storeStoWave(bool , bool,  Wave &storeArr[]);
+        int zigFibAnalyse(LeoSensors &sensor); // als backup für zigFibAnalyse
+        int zigLevAnalyse(LeoSensors &sensor);
+        void MaxMinAve_WaveDP();
+        void CorrelateZigFibSto();
+        void CorrelateMACDStochastic();
+
+        LeoSensors ls[7];
+        
+        double aveDP_Buy[5];
+        double aveDP_Sell[5];
+        double buyThreshold;
+        double sellThreshold;
+
+        Wave wM5[48];
+        Wave wM15[12];
+        Wave wM30[9];
+        Wave wH1[7];
+        Wave wH4[6];
+
+        Wave waves[5][48];
+
+
+        int zfM30[2];
+        int zfH1[2];
+        int zfH4[2];
+        int zfD1[2];
+
+        int zigLevM30[2];
+        int zigLevH1[2];
+        int zigLevH4[2];
+
+        int sumZfBuy;
+        int sumZfSell;
+        
+        // Neue Member für Marktzonen-Analyse
+        ZoneAlignment zoneAlignment;
+        MovePhase     movePhase;
+
+
+	public:
+        bool newTrade;
+		void updateCorrelator();
+
+        double riskFactor;
+
+
+        int sumZigBuy;
+        int sumZigSell;
+
+        bool ready2StartLook4Buy[5];  // Merker für die Buyfreigabe-Analyse
+        bool ready2StartLook4Sell[5]; // Merker für die Sellfreigabe-Analyse
+
+        int buyLevel;           // Merker für die Buyfreigabe-Analyse
+        int sellLevel;          // Merker für die Sellfreigabe-Analyse
+
+        int filterBuyLevel;     // als die Rückmeldung für die fehlerhafte Buyfreigabe (look4buy) 
+        int filterSellLevel;    // als die Rückmeldung für die fehlerhafte Sellfreigabe (look4sell)
+
+        bool look4Buy;
+        bool look4Sell;
+        
+};
+
+	void Correlator::setStoWave(LeoSensors &sensor, Wave &storeArr[]) {
+		// -- Stochastiche Analyse -------------------------------------------------------------
+		// Kaufwelle analysieren
+		if (sensor.StoBuy) { 
+			if (!storeArr[0].isBuyWave){
+                // DELETE LAST RECORD AND OVERWRITE INDEX 2 IF LAST BAR WAS ALSO BUY
+                if(sensor.stoch[1]>sensor.stochSigRed[1]){
+                    // korrigiere die letzte storeArr
+                    for(int i=0; i<ArraySize(storeArr)-1; i++){
+                        storeArr[i]=storeArr[i+1];
+                    }
+                    if(currentPrice>storeArr[0].endPrice){
+                        storeArr[0].endPrice=currentPrice;
+                        storeArr[0].endTime=currentTime;
+                    }
+                }
+                else{
+                    storeStoWave(true, false, storeArr);
+                }
+			}
+			else{
+                if(currentPrice>storeArr[0].endPrice){
+				    storeArr[0].endPrice=currentPrice;
+				    storeArr[0].endTime=currentTime;
+                }
+			}
+            if(storeArr[0].endPrice>0 && storeArr[0].startPrice>0)
+                storeArr[0].dp=storeArr[0].endPrice-storeArr[0].startPrice;
+		}
+		// Verkaufwelle analysieren
+		else if (sensor.StoSell) { 
+			if(!storeArr[0].isSellWave){
+                // DELETE LAST RECORD AND OVERWRITE INDEX 2 IF LAST BAR WAS ALSO SELL
+                if(sensor.stoch[1]<sensor.stochSigRed[1]){
+                    // korrigiere die letzte storeArr
+                    for(int i=0; i<ArraySize(storeArr)-1; i++){
+                        storeArr[i]=storeArr[i+1];
+                    }
+                    if(storeArr[0].endPrice == 0 || storeArr[0].endPrice>currentPrice){
+                        storeArr[0].endPrice=currentPrice;
+                        storeArr[0].endTime=currentTime;
+                    }
+                }
+                else{
+                    storeStoWave(false, true, storeArr);
+                }
+			}
+			else{
+                if(storeArr[0].endPrice == 0 || storeArr[0].endPrice>currentPrice){
+				    storeArr[0].endPrice=currentPrice;
+				    storeArr[0].endTime=currentTime;
+                }
+			}
+            if(storeArr[0].endPrice>0 && storeArr[0].startPrice>0)
+                storeArr[0].dp=storeArr[0].endPrice-storeArr[0].startPrice;
+
+		}
+	}
+
+	void Correlator::storeStoWave(bool isBuy, bool isSell, Wave &storeArr[]) {
+		for (int i = ArraySize(storeArr)-1; i > 0 ; i--) {
+			storeArr[i] = storeArr[i-1];
+		}
+		// Neue Welle hinzufügen
+        if(storeArr[1].endPrice==0){
+            storeArr[1].endPrice=currentPrice;
+            storeArr[1].endTime=currentTime;
+            if(storeArr[1].startPrice>0)
+                storeArr[1].dp=storeArr[1].endPrice-storeArr[1].startPrice;
+        }
+		storeArr[0].isBuyWave = isBuy;
+		storeArr[0].isSellWave = isSell;
+		storeArr[0].startPrice = storeArr[1].endPrice;
+		storeArr[0].endPrice = 0;
+        storeArr[0].dp = 0;
+		storeArr[0].startTime = storeArr[1].endTime;
+		storeArr[0].endTime = 0; // Noch nicht beendet
+        // set aveDP_Buy[indexAveDP] und aveDP_Sell[indexAveDP]
+        
+        
+	}
+
+    // backupversio für zigFibAnalyse
+    int Correlator::zigFibAnalyse(LeoSensors &sensor){
+        int ret = 0;
+        if(sensor.MyZig[0]>0){
+            if(MathAbs(sensor.MyZig[1]-sensor.MyZig[2])>1.4*MathAbs(sensor.MyZig[1]-sensor.MyZig[0]) && MathAbs(sensor.MyZig[1]-sensor.MyZig[2])>1.4*MathAbs(sensor.MyZig[2]-sensor.MyZig[3])){ // im kleinen ZigZag
+                if(sensor.MyZig[1]>sensor.MyZig[0]){
+                    ret = 3;   // may2Buy=true;
+                }
+                else if(sensor.MyZig[1]<sensor.MyZig[0]){
+                    ret = -3;  // may2Sell=true;
+                }
+            }
+            else if(1.4*MathAbs(sensor.MyZig[1]-sensor.MyZig[2])<MathAbs(sensor.MyZig[1]-sensor.MyZig[0]) && 1.4*MathAbs(sensor.MyZig[1]-sensor.MyZig[2])<MathAbs(sensor.MyZig[2]-sensor.MyZig[3])){ // im grösen ZigZag
+                if((sensor.MyZig[0]>sensor.AllFibo[10]) && 
+                    ((sensor.FibLineAktive && sensor.aktiveFibLev<12) || 
+                    (!sensor.FibLineAktive && sensor.FibLineAktive_candel && sensor.trendBuyFibQty_candel<3 && sensor.trendBuyFib_candel))){
+                        ret = 2;   // may2Buy=true;
+                }
+                
+                else if((sensor.MyZig[0]<sensor.AllFibo[7]) &&
+                        ((sensor.FibLineAktive && sensor.aktiveFibLev>5) || 
+                        (!sensor.FibLineAktive && sensor.FibLineAktive_candel && sensor.trendSellFibQty_candel<3 && sensor.trendSellFib_candel))){
+                        ret = -2;
+                }
+            }
+            else if(MathAbs(sensor.MyZig[1]-sensor.MyZig[2])*0.7<MathAbs(sensor.MyZig[1]-sensor.MyZig[0])){       // im fast gleichen ZigZag
+                if(sensor.timeframe>=PERIOD_M15){
+                    if(sensor.MyZig[1]>sensor.MyZig[0]){
+                        if(sensor.FibLineAktive && sensor.aktiveFibLev>5 && sensor.aktiveFibLev<7){
+                            ret = 1;
+                        }
+                    }
+                    else if(sensor.MyZig[1]<sensor.MyZig[0]){
+                        if(sensor.FibLineAktive && sensor.aktiveFibLev>8 && sensor.aktiveFibLev<12){
+                            ret = -1;
+                        }
+                    }
+                }
+            }
+        }
+        // else{
+        //     if(MathAbs(sensor.MyZig[3]-sensor.MyZig[2])>1.4*MathAbs(sensor.MyZig[1]-sensor.MyZig[2])){// im kleinen ZigZag
+        //         if(sensor.MyZig[1]>currentPrice){
+        //             ret = 3;   // may2Buy=true;
+        //         }
+        //         else if(sensor.MyZig[1]<currentPrice){
+        //             ret = -3;  // may2Sell=true;
+        //         }
+        //     }
+        //     else if(1.4*MathAbs(sensor.MyZig[3]-sensor.MyZig[2])<MathAbs(sensor.MyZig[1]-sensor.MyZig[2])){// im grösen ZigZag
+        //         if((currentPrice>sensor.AllFibo[10]) && 
+        //             ((sensor.FibLineAktive && sensor.aktiveFibLev<12) || 
+        //             (!sensor.FibLineAktive && sensor.FibLineAktive_candel && sensor.trendBuyFibQty_candel<3 && sensor.trendBuyFib_candel))){
+        //                 ret = 2;   // may2Buy=true;
+        //         }
+                
+        //         else if((currentPrice<sensor.AllFibo[7]) &&
+        //                 ((sensor.FibLineAktive && sensor.aktiveFibLev>5) || 
+        //                 (!sensor.FibLineAktive && sensor.FibLineAktive_candel && sensor.trendSellFibQty_candel<3 && sensor.trendSellFib_candel))){
+        //                 ret = -2;
+        //         }
+        //     }
+        //     else if(MathAbs(sensor.MyZig[1]-sensor.MyZig[2])*0.7<MathAbs(sensor.MyZig[1]-currentPrice)){// im fast gleichen ZigZag
+        //         if(sensor.timeframe>=PERIOD_M15){
+        //             if(sensor.MyZig[1]>currentPrice){
+        //                 if(sensor.FibLineAktive && sensor.aktiveFibLev>5 && sensor.aktiveFibLev<8){
+        //                     ret = 1;
+        //                 }
+        //                 else if(sensor.aktiveFibLev<6 && sensor.fiboGDown>currentPrice && sensor.fiboHDown<currentPrice){
+        //                     ret = -1;
+        //                 }
+        //             }
+        //             else if(sensor.MyZig[1]<currentPrice){
+        //                 if(sensor.FibLineAktive && sensor.aktiveFibLev>9 && sensor.aktiveFibLev<12){
+        //                     ret = -1;
+        //                 }
+        //                 else if(sensor.aktiveFibLev>11 && sensor.fiboGUp<currentPrice && sensor.fiboHUp>currentPrice){
+        //                     ret = 1;
+        //                 }
+        //             }
+        //         }
+
+        //     }
+        // }
+
+       return ret;
+    }
+
+    int Correlator::zigLevAnalyse(LeoSensors &sensor){
+        int ret = 0;
+        if(sensor.MyZig[0]>0){
+            if (MathAbs(sensor.MyZig[1]-sensor.MyZig[2])>1.4*MathAbs(sensor.MyZig[2]-sensor.MyZig[3])){ // im kleinen ZigZag
+                if(sensor.MyZig[1]>sensor.MyZig[0] 
+                    && (sensor.MyZig[1]-sensor.MyZig[0]<MathAbs(sensor.MyZig[2]-sensor.MyZig[3]))
+                    && (sensor.MyZig[1]-sensor.MyZig[0]>0.75*MathAbs(sensor.MyZig[2]-sensor.MyZig[3]))){
+                    ret = 3;   // may2Buy=true;
+                }
+                else if(sensor.MyZig[1]<sensor.MyZig[0]
+                    && (sensor.MyZig[0]-sensor.MyZig[1]<MathAbs(sensor.MyZig[2]-sensor.MyZig[3]))
+                    && (sensor.MyZig[0]-sensor.MyZig[1]>0.75*MathAbs(sensor.MyZig[2]-sensor.MyZig[3]))){
+                    ret = -3;  // may2Sell=true;
+                }
+            }
+            else if(1.4*MathAbs(sensor.MyZig[1]-sensor.MyZig[2])<MathAbs(sensor.MyZig[2]-sensor.MyZig[3])){ // im grösen ZigZag
+                if(sensor.MyZig[1]>sensor.MyZig[0]
+                    && (sensor.MyZig[1]-sensor.MyZig[0]<0.45*MathAbs(sensor.MyZig[2]-sensor.MyZig[3]))){
+                        ret = 2;   // may2Buy=true;#
+                }
+                else if(sensor.MyZig[1]<sensor.MyZig[0]
+                    && (sensor.MyZig[0]-sensor.MyZig[1]<0.45*MathAbs(sensor.MyZig[2]-sensor.MyZig[3]))){
+                        ret = -2;  // may2Sell=true;
+                }
+            }
+            else if(sensor.timeframe>=PERIOD_M30) {       // im fast gleichen ZigZag
+                if(sensor.MyZig[1]>sensor.MyZig[0] 
+                    && (sensor.MyZig[1]-sensor.MyZig[0]<0.4*MathAbs(sensor.MyZig[1]-sensor.MyZig[2]))){
+                        ret = 1;
+                }
+                else if(sensor.MyZig[1]<sensor.MyZig[0] 
+                    && (sensor.MyZig[0]-sensor.MyZig[1]<0.4*MathAbs(sensor.MyZig[1]-sensor.MyZig[2]))){
+                        ret = -1;
+                }
+            }
+        }
+        
+        else{
+            if(MathAbs(sensor.MyZig[3]-sensor.MyZig[2])>1.4*MathAbs(sensor.MyZig[3]-sensor.MyZig[4])){// im kleinen ZigZag
+                if(sensor.MyZig[1]>currentPrice
+                    && (sensor.MyZig[1]-currentPrice<MathAbs(sensor.MyZig[3]-sensor.MyZig[4]))
+                    && (sensor.MyZig[1]-currentPrice>0.75*MathAbs(sensor.MyZig[3]-sensor.MyZig[4]))){
+                    ret = 3;   // may2Buy=true;
+                }
+                else if(sensor.MyZig[1]<currentPrice
+                    && (currentPrice-sensor.MyZig[1]<MathAbs(sensor.MyZig[3]-sensor.MyZig[4]))
+                    && (currentPrice-sensor.MyZig[1]>0.75*MathAbs(sensor.MyZig[3]-sensor.MyZig[4]))){
+                    ret = -3;  // may2Sell=true;
+                }
+            }
+            else if(1.4*MathAbs(sensor.MyZig[3]-sensor.MyZig[2])<MathAbs(sensor.MyZig[3]-sensor.MyZig[4])){// im grösen ZigZag
+                if(sensor.MyZig[1]>currentPrice
+                    && (sensor.MyZig[1]-currentPrice<0.45*MathAbs(sensor.MyZig[3]-sensor.MyZig[4]))){
+                        ret = 2;   // may2Buy=true;
+                }
+                else if(sensor.MyZig[1]<currentPrice
+                    && (currentPrice-sensor.MyZig[1]<0.45*MathAbs(sensor.MyZig[3]-sensor.MyZig[4]))){
+                        ret = -2;  // may2Sell=true;
+                }
+            }
+            else if(sensor.timeframe>=PERIOD_M15){// im fast gleichen ZigZag
+                if(sensor.MyZig[1]>currentPrice 
+                    && (sensor.MyZig[1]-currentPrice<0.4*MathAbs(sensor.MyZig[3]-sensor.MyZig[2]))){
+                        ret = 1;   // may2Buy=true;
+                }
+                else if(sensor.MyZig[1]<currentPrice 
+                    && (currentPrice-sensor.MyZig[1]<0.4*MathAbs(sensor.MyZig[3]-sensor.MyZig[2]))){
+                        ret = -1;  // may2Sell=true;
+                }
+
+            }
+        }
+ 
+       return ret;
+    }
+
+    void Correlator::CorrelateZigFibSto() {
+        filterBuyLevel = 0;
+        filterSellLevel = 0;
+
+        int zf[3]; // ZigZag-Werte
+        zf[0] = zfM30[0]+zfM30[1];
+        zf[1] = zfH1[0]+zfH1[1];
+        zf[2] = zfH4[0]+zfH4[1];
+
+        sumZfBuy = 0;
+        sumZfSell = 0;
+        
+        if(zfM30[0]>0 && waves[0][2].isBuyWave && aveDP_Sell[2]<0 && aveDP_Buy[2]>-aveDP_Sell[2]*1.1) sumZfBuy+=zfM30[0];
+        else if(zfM30[0]<0 && waves[0][2].isSellWave && aveDP_Buy[2]>0 && aveDP_Buy[2]*1.1<-aveDP_Sell[2]) sumZfSell+=zfM30[0];
+       
+        if(zfH1[0]>0 && waves[0][3].isBuyWave && aveDP_Sell[3]<0 && aveDP_Buy[3]>-aveDP_Sell[3]*1.1) sumZfBuy+=zfH1[0];
+        else if(zfH1[0]<0 && waves[0][3].isSellWave && aveDP_Buy[3]>0 && aveDP_Buy[3]*1.1<-aveDP_Sell[3]) sumZfSell+=zfH1[0];
+        
+        if(zfH4[0]>0 && waves[0][4].isBuyWave && aveDP_Sell[4]<0 && aveDP_Buy[4]>-aveDP_Sell[4]*1.1) sumZfBuy+=zfH4[0];
+        else if(zfH4[0]<0 && waves[0][4].isSellWave && aveDP_Buy[4]>0 && aveDP_Buy[4]*1.1<-aveDP_Sell[4]) sumZfSell+=zfH4[0];
+
+    }
+
+    void Correlator::MaxMinAve_WaveDP() {
+        double normalizationFactors[5] = {1.0, 3.0, 6.0, 12.0, 48.0}; // M5:1, M15:3, M30:6, H1:12, H4:48
+        int waveCounts[5]; // = {48, 24, 12, 6, 14}; // M5, M15, M30, H1, H4
+        
+        waveCounts[0]=ArraySize(wM5);
+        waveCounts[1]=ArraySize(wM15);
+        waveCounts[2]=ArraySize(wM30);
+        waveCounts[3]=ArraySize(wH1);
+        waveCounts[4]=ArraySize(wH4);
+
+
+        for (int x = 0; x < 5; x++) {
+            double buyDps[], sellDps[];
+            int buyIndex = 0, sellIndex = 0;
+            ArrayResize(buyDps, waveCounts[x]); // Vorab Platz reservieren
+            ArrayResize(sellDps, waveCounts[x]);
+
+            // Sammle und normalisiere dp-Werte
+            for (int y = 0; y < waveCounts[x]; y++) {
+                if(waves[x][y].dp!=0.0){
+                    double normalizedDp = waves[x][y].dp / normalizationFactors[x];
+                    if (waves[x][y].isBuyWave && waves[x][y].dp > 0) {
+                        buyDps[buyIndex] = normalizedDp;
+                        buyIndex++;
+                    } else if (waves[x][y].isSellWave && waves[x][y].dp < 0) {
+                        sellDps[sellIndex] = normalizedDp;
+                        sellIndex++;
+                    }
+                }
+            }
+
+            double sortBuyDps[], sortSellDps[];
+
+            ArrayResize(sortBuyDps, buyIndex); // Auf tatsächliche Größe anpassen
+            ArrayResize(sortSellDps, sellIndex);
+
+            // Kopie 
+            ArrayCopy(sortBuyDps, buyDps, 0, 0, buyIndex);
+            ArrayCopy(sortSellDps, sellDps, 0, 0, sellIndex);
+
+            ArraySort(sortBuyDps, WHOLE_ARRAY, 0, MODE_DESCEND);
+            ArraySort(sortSellDps, WHOLE_ARRAY, 0, MODE_ASCEND);
+
+            int buyCount = buyIndex;
+            int sellCount = sellIndex;
+            int buyHalf = (int) MathCeil(buyCount / 2.0);
+            int sellHalf = (int) MathCeil(sellCount / 2.0);
+
+            double sumBuyDp = 0, sumSellDp = 0;
+            for (int i = 0; i < buyHalf && i < buyCount; i++) {
+                sumBuyDp += sortBuyDps[i];
+            }
+            for (int i = 0; i < sellHalf && i < sellCount; i++) {
+                sumSellDp += sortSellDps[i];
+            }
+            
+            aveDP_Buy[x]=0;
+            aveDP_Sell[x]=0;
+            aveDP_Buy[x] = (buyHalf > 0) ? sumBuyDp / buyHalf : 0;
+            aveDP_Sell[x] = (sellHalf > 0) ? sumSellDp / sellHalf : 0;
+        }
+        int cunt = 0;
+        buyThreshold=0;
+        sellThreshold=0;
+
+        for (int i=0; i<ArraySize(aveDP_Buy); i++)
+            if(aveDP_Buy[i]>0){
+                cunt++;
+                buyThreshold+=aveDP_Buy[i];
+            }
+        buyThreshold=(cunt > 0) ? buyThreshold/cunt : 0; 
+
+        cunt = 0;
+        for (int i=0; i<ArraySize(aveDP_Sell); i++)
+            if(aveDP_Sell[i]<0){
+                cunt++;
+                sellThreshold+=aveDP_Sell[i];
+            }
+        sellThreshold=(cunt > 0) ? sellThreshold/cunt : 0; 
+    }
+
+    void Correlator::CorrelateMACDStochastic(){
+        int tmpBuyLevel=0;
+        int tmpSellLevel=0;
+        int tmpBuyMACD=0;
+        int tmpSellMACD=0;
+        
+        for(int i=2; i<ArraySize(ls); i++){ // MACD-Schleife
+            for(int j=0; j<=i; j++){ // Stochastich-Schleife
+                if(ls[i].MACD_Trend>0){
+                    if(ls[j].StoBuy && (ls[j].stoch[0]<20 || ls[j].stoch[1]<20)){
+                        tmpBuyLevel+=(int)pow(2,(i+j));
+                        if (tmpBuyMACD==0) {
+                            tmpBuyMACD=ls[i].MACD_Trend;
+                            atr=ls[i].atr;
+                        }
+                    }
+                }
+                else if(ls[i].MACD_Trend<0){
+                    if(ls[j].StoSell && (ls[j].stoch[0]>80 || ls[j].stoch[1]>80)){
+                        tmpSellLevel+=(int)pow(2,(i+j));
+                        if (tmpSellMACD==0) {
+                            tmpSellMACD=ls[i].MACD_Trend;
+                            atr=ls[i].atr;
+                        }
+                    }
+                }
+            }
+        }
+        if(tmpBuyLevel>0 && tmpSellLevel==0) {buyLevel=tmpBuyLevel; sellLevel=0;}
+        if(tmpSellLevel>0 && tmpBuyLevel==0) {sellLevel=tmpSellLevel; buyLevel=0;}
+        if(atr<ls[3].atr)atr=ls[3].atr;
+    }
+
+	void Correlator::updateCorrelator() {
+        
+        filterBuyLevel = 0;
+        filterSellLevel = 0;
+        // Session-Daten aktualisieren (bereits in UpdateSessionData)
+        UpdateSessionData();
+
+        
+
+        // -> Zonen-Gewichtung ermitteln
+        double zoneWeight = 0.0;
+        switch(activeSession.alignment) {
+            case ALL_ALIGN_BUY:         zoneWeight = 1.2; break;
+            case ALL_ALIGN_SELL:        zoneWeight = 1.2; break;
+            case TWO_DOM_ONE_CORR_BUY:  zoneWeight = 1.0; break;
+            case TWO_DOM_ONE_CORR_SELL: zoneWeight = 1.0; break;
+            case ONE_DOM_TWO_CORR_BUY:  zoneWeight = 0.8; break;
+            case ONE_DOM_TWO_CORR_SELL: zoneWeight = 0.8; break;
+            case NO_CLEAR_PATTERN:      zoneWeight = 0.0; break;
+        }
+        // Feinanpassung je nach Phase
+        if(activeSession.phase == PHASE_BUY || activeSession.phase == PHASE_SELL)      zoneWeight *= 1.1;
+        else if(activeSession.phase == PHASE_CORR_IN_BUY || activeSession.phase == PHASE_CORR_IN_SELL)  zoneWeight *= 0.7;
+        else if(activeSession.phase == PHASE_NEUTRAL)   zoneWeight *= 0.5;
+        // sonst PHASE_NEUTRAL: zoneWeight bleibt
+        
+
+        // 3) Sensor-Daten ziehen
+        ls[0]=LS_M5;  ls[1]=LS_M15;  ls[2]=LS_M30;
+        ls[3]=LS_H1;  ls[4]=LS_H4;
+
+        // Aktualisieren von ZigZag-Fiboanalysewerte 
+        // zigFibAnalyse
+            int tmpZF=0;
+            
+            tmpZF = zigFibAnalyse(LS_M30);
+            if (zfM30[0] != tmpZF){
+                zfM30[1] = zfM30[0];
+                zfM30[0] = tmpZF;
+            } 
+            
+            tmpZF = zigFibAnalyse(LS_H1);
+            if (zfH1[0] != tmpZF){
+                zfH1[1] = zfH1[0];
+                zfH1[0] = tmpZF;
+            } 
+            
+            tmpZF = zigFibAnalyse(LS_H4);
+            if (zfH4[0] != tmpZF){
+                zfH4[1] = zfH4[0];
+                zfH4[0] = tmpZF;
+            }
+
+        // zigLevAnalyse 
+            
+            tmpZF = zigLevAnalyse(LS_M30);
+            if (zigLevM30[0] != tmpZF){
+                zigLevM30[1] = zigLevM30[0];
+                zigLevM30[0] = tmpZF;
+            } 
+            
+            tmpZF = zigLevAnalyse(LS_H1);
+            if (zigLevH1[0] != tmpZF){
+                zigLevH1[1] = zigLevH1[0];
+                zigLevH1[0] = tmpZF;
+            } 
+            
+            tmpZF = zigLevAnalyse(LS_H4);
+            if (zigLevH4[0] != tmpZF){
+                zigLevH4[1] = zigLevH4[0];
+                zigLevH4[0] = tmpZF;
+            }
+
+
+        // gieb atr den Dominante sensor ls[dominant].atr für Berrechnung der Stoploss und Takegewinn
+        
+
+        setStoWave(ls[0], wM5);
+        setStoWave(ls[1], wM15);
+        setStoWave(ls[2], wM30);
+        setStoWave(ls[3], wH1);
+        setStoWave(ls[4], wH4);
+
+        for (int i = 0; i<ArraySize(wM5); i++ )
+            waves[0][i] = wM5[i];
+        for (int i = 0; i<ArraySize(wM15); i++ )
+            waves[1][i] = wM15[i];
+        for (int i = 0; i<ArraySize(wM30); i++ )
+            waves[2][i] = wM30[i];
+        for (int i = 0; i<ArraySize(wH1); i++ )
+            waves[3][i] = wH1[i];
+        for (int i = 0; i<ArraySize(wH4); i++ )
+            waves[4][i] = wH4[i];
+
+        MaxMinAve_WaveDP();
+                 
+		// Implementieren der Hauptroutine des Korrelatores
+        CorrelateZigFibSto();
+
+        // ------------- lokale Korrelation 
+        // -- bewerten von ready2StartLook4Buy[5] oder ready2StartLook4Buy[5] anhand werte der zfX[0] und zfX[1] 
+        sumZigBuy = 0;
+        sumZigSell = 0;
+        // -- buy 
+
+            if(zigLevM30[0] == 1)       sumZigBuy+=64;
+            else if(zigLevM30[0] == 2)  sumZigBuy+=128;
+            else if(zigLevM30[0] == 3)  sumZigBuy+=256;
+            
+            if(zigLevH1[0] == 1)        sumZigBuy+=512;
+            else if(zigLevH1[0] == 2)   sumZigBuy+=1024;
+            else if(zigLevH1[0] == 3)   sumZigBuy+=2048;
+            
+            if(zigLevH4[0] == 1)        sumZigBuy+=4096;
+            else if(zigLevH4[0] == 2)   sumZigBuy+=8192;
+            else if(zigLevH4[0] == 3)   sumZigBuy+=16384;
+        
+
+        // -- sell
+            
+            if(zigLevM30[1] == -1)      sumZigSell+=64;
+            else if(zigLevM30[1] == -2) sumZigSell+=128;
+            else if(zigLevM30[1] == -3) sumZigSell+=256;
+            
+            if(zigLevH1[1] == -1)       sumZigSell+=512;
+            else if(zigLevH1[1] == -2)  sumZigSell+=1024;
+            else if(zigLevH1[1] == -3)  sumZigSell+=2048;
+            
+            if(zigLevH4[1] == -1)       sumZigSell+=4096;
+            else if(zigLevH4[1] == -2)  sumZigSell+=8192;
+            else if(zigLevH4[1] == -3)  sumZigSell+=16384;
+        
+
+        
+        
+        // -- bewerten von look4Buy oder look4Sell anhand ergebnisse der ready2StartLook4Buy[5] oder ready2StartLook4Buy[5]
+
+        // gab Breakout?
+        //      ja:  ist höhe/tiefe (nächste Fiboline) Punkt erreicht?
+        //          ja:  hat korrektur stattgefunden?
+        //              ja:  dann look4Buy=true oder look4Sell=true richtungs breackout oder häftige kursbewegung
+        //              nein: look4Buy=false oder look4Sell=false
+        //          nein: handeln richtung der nächsten Fiboline
+        //      nein:  ermitteln letzte Breakout-Richtung
+        //             liegt der Kurs in der Nähe der letzten Breakout-Linie?
+        //             ja:  unterstützen die Sensoren neue Breakout?
+        //                  ja: breakout handeln vorbereiten
+        //                  nein: gegenrichtung handeln
+        //             nein:  weiter in der alten Richtung handeln
+
+        if(LS_H4.zigTrendBuy && LS_H4.aktiveFibLev>10){
+            
+        }
+        else if(LS_H4.zigTrendSell && LS_H4.aktiveFibLev<7){
+
+        }
+        else{ // keine klare Richtung bzw. kein Breakout (Flachmarkt)
+            // mini-trend bzw. support- und widerstandsniveau linien finden
+        }
+        
+        CorrelateMACDStochastic();
+        atr = MathAbs(atr);
+
+        if (zoneWeight==0) {
+            look4Sell = false;
+            look4Buy = false;
+        }
+        else{
+            if(buyLevel>0 && sumZigSell==0 && sumZigBuy>0){ //(movePhase == PHASE_BUY || movePhase == PHASE_CORR_IN_SELL) && 
+                look4Buy = true;
+                // Neuer Risikofaktor 30-100
+                double score = (double)sumZigBuy / ((double)sumZigBuy + MathAbs(sumZigSell) + 1);
+                riskFactor = (int)(30 + 70 * score * zoneWeight);
+                riskFactor = MathMax(30, MathMin(100, riskFactor));
+                riskFactor/= 50;
+            }
+        
+            else if(sellLevel>0 && sumZigBuy==0 && sumZigSell>0){ //(movePhase == PHASE_SELL || movePhase == PHASE_CORR_IN_BUY) && 
+                look4Sell = true;
+                // Neuer Risikofaktor 30-100
+                double score = (double)sumZigSell / ((double)sumZigBuy + MathAbs(sumZigSell) + 1);
+                riskFactor = (int)(30 + 70 * score * zoneWeight);
+                riskFactor = MathMax(30, MathMin(100, riskFactor));
+                riskFactor/= 50;
+            }
+            
+            else{
+                look4Buy=false;
+                look4Sell = false;
+            }
+            
+        }
+
+
+
+        // riskFactor=zoneWeight;
+        
+        // if(movePhase == PHASE_BUY || movePhase == PHASE_CORR_IN_SELL){
+        //     look4Buy=true;
+        //     look4Sell = false;
+        // }
+        // else if(movePhase == PHASE_SELL || movePhase == PHASE_CORR_IN_BUY){
+        //     look4Buy=false;
+        //     look4Sell = true;
+        // }
+        // else{
+        //     look4Buy=false;
+        //     look4Sell = false;
+        // }
+        
+
+	}
+
+Correlator correlat;
+
+//+------------------------------------------------------------------+
+//| Order Histories                                                  |
+//+------------------------------------------------------------------+
+struct MyOrder{
+    int ticketNr;
+    int type;
+    double openPrice;
+    double closePrice;
+    double TakeProfit;
+    double StopLoss;
+    double ProfitPoints;
+    double Profit;
+    datetime openTime;
+    datetime closeTime;
+    
+    Correlator closeCorr;
+
+    Correlator openCorr;
+
+} user[10], currRobotBuf, robotHist[10];
+
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                 |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    //---
+    currentTime=TimeCurrent();
+    currentPrice = (Ask+Bid)/2;
+
+    Print ("OnInit");
+    char x[10]; // to creat magic number based on symbol name
+    pipValue   = MarketInfo(Symbol(),MODE_POINT); 
+    Print("pipValue:", pipValue);
+    minStopLevel = MarketInfo(Symbol(), MODE_STOPLEVEL)*pipValue;  // Mindestabstand zum Stop-Loss
+
+    vdigits = (int)MarketInfo(Symbol(),MODE_DIGITS); 
+    minLot = MarketInfo(Symbol(), MODE_MINLOT);
+    
+    LS_H4.init_Leo(PERIOD_H4, "MyZigZag", 8, 3);
+    LS_H1.init_Leo(PERIOD_H1, "MyZigZag", 8, 3);
+
+    LS_M30.init_Leo(PERIOD_M30, "MyZigZag", 8, 3);
+    LS_M15.init_Leo(PERIOD_M15, "MyZigZag", 8, 3);
+    LS_M5.init_Leo(PERIOD_M5, "MyZigZag", 8, 3);
+
+
+    lastAsk=Ask;
+    lastBid=Bid;
+
+    // set a magic number based on Symbol name
+    StringToCharArray(Symbol(),x,0,StringLen(Symbol()));
+
+    for (int i=0; i<StringLen(Symbol()); i++)
+        MAGIC_NO+=int(x[i])*(int)MathPow(2,i);
+    
+    rst_Order_State();
+    check_orders_on_init();
+    recalcSecureVol();
+    updateSensors();
+    
+    InitSessionHistory();
+    PrintAllSessionData();
+    
+    Print("On Init is done");
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    //---
+    Print (MQLInfoString(MQL_PROGRAM_NAME)+" Removed");
+   
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    Spread = (int)MarketInfo(Symbol(),MODE_SPREAD) * Point;
+    currentPrice = (Ask+Bid)/2;
+    currentTime = TimeCurrent();
+    if(DayDiff(SecureVolUpdateTime,currentTime)>=2 || SecureVol==0) recalcSecureVol();
+    
+    
+    // check, ob die letzte Position immmer noch offen ist 
+    if (currRobotBuf.ticketNr>-1) check_order(currRobotBuf);
+    updateSensors();
+    lastAsk=Ask;
+    lastBid=Bid;
+
+    if(TimeDay(robotHist[0].closeTime) != TimeDay(currentTime)){
+        totalRiskToday=0;
+        totalProfitToday=0;
+        buyAllowed=true;
+        sellAllowed=true;
+    }
+    
+    if(DayDiff(weeklyTime,currentTime)>7){
+        weeklyTime=currentTime;
+        totalRiskWeek=0;
+        totalProfitWeek=0;
+    }
+
+    if (currRobotBuf.ticketNr>-1) checkClose();
+    else { //if(currRobotBuf.openTime==0){
+        int ticket=0;
+        switch(getCMD()){
+        case OP_BUY:
+            if(buyAllowed && ROBOTTRADE &&  currRobotBuf.StopLoss>0){ 
+                currRobotBuf.TakeProfit=NormalizeDouble(currRobotBuf.TakeProfit, vdigits);
+                currRobotBuf.StopLoss=NormalizeDouble(currRobotBuf.StopLoss, vdigits);
+                currRobotBuf.ticketNr=OrderSend(Symbol(),OP_BUY,lots,Ask,3,currRobotBuf.StopLoss,currRobotBuf.TakeProfit,"AI",MAGIC_NO,0,Blue);
+                Print("ticket: ", ticket);
+                if(currRobotBuf.ticketNr<0){
+                    Print(GetLastError());
+                    PrintFormat("OP_BUY with lots: %f, Ask: %f, StopLoss: %f, TakeProfit: %f ", lots, Ask, currRobotBuf.StopLoss, currRobotBuf.TakeProfit);
+                }
+                else {
+                    correlat.newTrade = true;
+                    currRobotBuf.openPrice=Ask;
+                    currRobotBuf.openCorr = correlat;
+                    currRobotBuf.type = OP_BUY;
+                }
+            }
+            else Print("OP_BUY is muted");
+            break;
+
+        case OP_SELL:
+            if(sellAllowed &&  ROBOTTRADE &&  currRobotBuf.StopLoss>0){ 
+                currRobotBuf.TakeProfit=NormalizeDouble(currRobotBuf.TakeProfit, vdigits);
+                currRobotBuf.StopLoss=NormalizeDouble(currRobotBuf.StopLoss, vdigits);
+                currRobotBuf.ticketNr=OrderSend(Symbol(),OP_SELL,lots,Bid,3,currRobotBuf.StopLoss,currRobotBuf.TakeProfit,"AI",MAGIC_NO,0,Red);
+                if(currRobotBuf.ticketNr<0){
+                    Print(GetLastError());
+                    PrintFormat("OP_SELL with lots: %f, Bid: %f, StopLoss: %f, TakeProfit: %f ", lots, Bid, currRobotBuf.StopLoss, currRobotBuf.TakeProfit);
+                }
+                else {
+                    correlat.newTrade = true;
+                    currRobotBuf.openPrice=Bid;
+                    currRobotBuf.openCorr = correlat;
+                    currRobotBuf.type = OP_SELL;
+                }
+            }
+            else Print("OP_SELL is muted");
+                
+            break;
+
+        case 6:
+            break;
+        }
+    }
+    
+}
+
+
+//+------------------------------------------------------------------+
+//| update profit                                                    |
+//+------------------------------------------------------------------+
+void profitUpdate(){
+    if(!correlatorTest){
+        if(robotHist[0].Profit>=0){
+            totalProfitToday+=robotHist[0].ProfitPoints;
+            totalProfitWeek+=robotHist[0].ProfitPoints;
+            buyAllowed=true;
+            sellAllowed=true;
+        }
+            // informiere corellator über seine falsche Entscheidung
+        if ((robotHist[1].Profit<0 && (HourDiff(robotHist[0].closeTime, currentTime)<10)) //|| MathAbs(robotHist[0].closePrice-currentPrice)<200*Point
+            &&
+            (robotHist[0].openCorr.sumZigBuy == correlat.sumZigBuy
+            ||
+            robotHist[0].openCorr.sumZigSell == correlat.sumZigSell) 
+            ){
+        // if(robotHist[1].type==OP_BUY && robotHist[0].type==OP_BUY)
+            buyAllowed=false;
+        // if(robotHist[1].type==OP_SELL && robotHist[0].type==OP_SELL)
+            sellAllowed=false;
+            // look4Buy=false;
+            // look4Sell=false;
+        }
+        else{
+            buyAllowed=true;
+            sellAllowed=true;
+        }
+    }
+    
+}
+
+
+
+
+//+------------------------------------------------------------------+
+//| update defiened Leo-Sensor                                       |
+//+------------------------------------------------------------------+
+void updateSensors(){
+    
+    LS_H4.updateLeo();
+    LS_H1.updateLeo();
+    LS_M30.updateLeo();
+    LS_M15.updateLeo();
+    LS_M5.updateLeo();
+    
+    correlat.updateCorrelator();
+
+    double buy_limit_small=0, buy_stop_small=0, sell_limit_small=0, sell_stop_small=0;
+    buy_limit = buy_stop = sell_limit = sell_stop = 0;
+
+    if(correlat.look4Buy){
+        look4Buy=true;
+        look4Sell=false;
+    }
+    else if(correlat.look4Sell){
+        look4Sell=true;
+        look4Buy=false;
+    }
+
+    if(look4Buy){
+        fib_5=LS_H4.AllFibo[12];
+        fib_0=LS_H4.AllFibo[6];
+    }
+    else if(look4Sell){
+        fib_5=LS_H4.AllFibo[6];
+        fib_0=LS_H4.AllFibo[12];
+    }
+    
+
+    if(currentPrice>LS_M5.MyZigPeak || currentPrice>LS_M5.fibo_candel[9]  || (LS_M5.stoch[0]<20 && LS_M5.StoBuy) ) { // 
+        m_buy_limit_small=LS_M5.AktiveFibDown;
+        m_buy_stop_small=LS_M5.AktiveFibUp;
+        if(LS_M5.AktiveFibDown_candel>m_buy_limit_small) m_buy_limit_small=LS_M5.AktiveFibDown_candel;
+        if(LS_M5.AktiveFibUp_candel<m_buy_stop_small) m_buy_stop_small=LS_M5.AktiveFibUp_candel;
+        dontSell_up=dontSell_down=m_sell_limit_small=m_sell_stop_small=0;
+    }
+    if(currentPrice<LS_M5.MyZigLawn || currentPrice<LS_M5.fibo_candel[6] || (LS_M5.stoch[0]>80 && LS_M5.StoSell)) { //  
+        m_sell_stop_small=LS_M5.AktiveFibDown;
+        m_sell_limit_small=LS_M5.AktiveFibUp;
+        if(m_sell_stop_small<LS_M5.AktiveFibDown_candel) m_sell_stop_small=LS_M5.AktiveFibDown_candel;
+        if(m_sell_limit_small>LS_M5.AktiveFibUp_candel) m_sell_limit_small=LS_M5.AktiveFibUp_candel;
+        dontBuy_up=dontBuy_down=m_buy_limit_small=m_buy_stop_small=0;
+    }
+
+    if(m_buy_limit_small>0 ){ 
+      if(currRobotBuf.ticketNr<0 && (currentPrice<m_buy_limit_small-(m_buy_stop_small-m_buy_limit_small))){ // um Markt spannen lassen und größere Potential zu schaffen (bei Öffnen neue Position) 
+            double tmpStop=m_buy_limit_small;
+            double tmpLimit=m_buy_limit_small-(m_buy_stop_small-m_buy_limit_small);
+            m_buy_stop_small=tmpStop;
+            m_buy_limit_small=tmpLimit;
+        }
+        buy_limit_small=m_buy_limit_small;
+        buy_stop_small=m_buy_stop_small;
+        sell_limit_small=m_sell_limit_small=0;
+        sell_stop_small=m_sell_stop_small=0;
+    }
+    if(m_sell_limit_small>0 ){
+        if(currRobotBuf.ticketNr<0 && (currentPrice>m_sell_limit_small+(m_sell_limit_small-m_sell_stop_small))){ // um Markt spannen lassen und größere Potential zu schaffen (bei Öffnen neue Position)
+            double tmpStop=m_sell_limit_small;
+            double tmpLimit=m_sell_limit_small+(m_sell_limit_small-m_sell_stop_small);
+            m_sell_limit_small=tmpLimit;
+            m_sell_stop_small=tmpStop;
+
+        }
+            sell_limit_small=m_sell_limit_small;
+            sell_stop_small=m_sell_stop_small;
+            buy_limit_small=m_buy_limit_small=0;
+            buy_stop_small=m_buy_stop_small=0;
+    }
+
+    // ################################################## Setup final lines
+    if(look4Buy){ 
+        buy_limit=buy_limit_small;
+        buy_stop=buy_stop_small;
+        // sell_limit = sell_stop = 0;
+    }
+    else if(look4Sell){ 
+        sell_limit=sell_limit_small;
+        sell_stop=sell_stop_small;
+        // buy_limit = buy_stop =0;
+    }
+
+    Draw();
+}
+
+//+------------------------------------------------------------------+
+//| care to close or adjust TP/SL                                    |
+//+------------------------------------------------------------------+
+void checkClose()
+{  
+    bool needModify=false;
+    bool closePos=false;
+
+    if (currRobotBuf.type!=6){
+        
+        if (currRobotBuf.type==OP_BUY){
+            double estimatedProfit=(currRobotBuf.TakeProfit-currRobotBuf.openPrice);
+            double currentProfit=(Bid-currRobotBuf.openPrice);
+            double epsilon=estimatedProfit/20;
+
+            // close buy positions before raising swap
+            if( (!correlatorTest && (
+                    TimeHour(currentTime)>=22 
+                    // || 
+                    // correlat.look4Sell
+                    ))
+                ||
+                (correlatorTest && correlat.look4Sell)
+                ) closePos=true;
+            
+            
+
+            // modify stop loss and take profit in win sitoation (Trailing Stop)
+            // currRobotBuf.StopLoss=currentPrice-(atr*0.25);
+            // currRobotBuf.TakeProfit=currentPrice+(atr*2);
+
+            if(!correlatorTest && currentProfit>pipValue*100 && currentProfit>atr*0.5 ){
+                // adjust take profit
+                
+
+                // adjust stoploss 
+                
+                if((currentPrice-LS_M5.MyZigLawn+minStopLevel)>50*pipValue && (LS_M5.MyZigLawn-currRobotBuf.openPrice)>50*pipValue && currRobotBuf.StopLoss<LS_M5.MyZigLawn)
+                {   
+                    currRobotBuf.StopLoss=LS_M5.MyZigLawn;
+                    needModify=true;
+                }
+                else if (m_buy_limit_small>0 && currentPrice>m_buy_stop_small && currentProfit>(m_buy_stop_small-m_buy_limit_small) && m_buy_limit_small>currRobotBuf.StopLoss && m_buy_limit_small-currRobotBuf.openPrice>pipValue*100)
+                {
+                    currRobotBuf.StopLoss = m_buy_limit_small;
+                    needModify = true;
+                    dontBuy_up=m_buy_stop_small+0.5*(m_buy_stop_small-m_buy_limit_small);
+                    dontBuy_down=m_buy_limit_small-2*(m_buy_stop_small-m_buy_limit_small);
+                }
+                else if((LS_M5.trendSellFib||LS_M5.trendSellFib_candel) && m_sell_stop_small>0 && m_sell_stop_small-0.2*atr-currRobotBuf.openPrice>pipValue*100 && currRobotBuf.StopLoss<m_sell_stop_small-0.2*atr){
+                    currRobotBuf.StopLoss=m_sell_stop_small-0.2*atr;
+                    needModify=true;
+                }
+            }
+            
+            // apply the decision (close or modify position)
+            // ---------------------------------------------
+            // if(closePos) ModifyTP(CLOSE_BUY, currRobotBuf);
+            // else if(!correlatorTest && needModify) ModifyTP(OP_BUY, currRobotBuf);
+            
+        }
+
+        else if(currRobotBuf.type==OP_SELL){
+            double estimatedProfit=MathAbs(currRobotBuf.openPrice-currRobotBuf.TakeProfit);
+            double currentProfit=currRobotBuf.openPrice-Ask;
+            double epsilon=estimatedProfit/20;
+
+            // close buy positions before raising swap
+            if((!correlatorTest && (
+                    TimeHour(currentTime)>=22 
+                    // || 
+                    // correlat.look4Buy
+                    ))
+                ||
+                (correlatorTest && correlat.look4Buy)
+                ) closePos=true;
+
+            // modify stop loss and take profit in win sitoation (Trailing Stop)
+            if(!correlatorTest && currentProfit>pipValue*100 && currentProfit>atr*0.5){
+                // adjust take profit
+
+                // adjust stoploss
+                
+                if ((LS_M5.MyZigPeak-currentPrice+minStopLevel)>50*pipValue && (currRobotBuf.openPrice-LS_M5.MyZigPeak)>50*pipValue && currRobotBuf.StopLoss>LS_M5.MyZigPeak)
+                {   
+                    currRobotBuf.StopLoss = LS_M5.MyZigPeak;
+                    needModify = true;
+                }
+                else if (m_sell_limit_small>0 && currentPrice<m_sell_stop_small && currentProfit>(m_sell_limit_small-m_sell_stop_small) && m_sell_limit_small<currRobotBuf.StopLoss && currRobotBuf.openPrice-m_sell_limit_small>pipValue*100)
+                {
+                    currRobotBuf.StopLoss = m_sell_limit_small;
+                    needModify = true;
+                    dontSell_up=m_sell_limit_small+2*(m_sell_limit_small-m_sell_stop_small);
+                    dontSell_down=m_sell_stop_small-0.5*(m_sell_limit_small-m_sell_stop_small);
+                }
+                else if((LS_M5.trendBuyFib||LS_M5.trendBuyFib_candel) && m_buy_stop_small>0 && currRobotBuf.openPrice-m_buy_stop_small+0.2*atr>pipValue*100 && currRobotBuf.StopLoss>m_buy_stop_small+0.2*atr){
+                    currRobotBuf.StopLoss=m_buy_stop_small+0.2*atr;
+                    needModify=true;
+                }
+
+            }
+            
+            
+
+            // apply the decision (close or modify position) 
+            // ---------------------------------------------
+            // if(closePos) ModifyTP(CLOSE_SELL, currRobotBuf);
+            // else if(!correlatorTest && needModify) ModifyTP(OP_SELL, currRobotBuf);
+        }
+
+    }// ende Robot
+
+
+    for (int i=0; i<userOrderTotal; i++){ // for manual opened positions (maybe later will developed)
+        if (user[i].type==OP_BUY){
+            
+        }
+
+        else if(user[i].type==OP_SELL){
+            
+        }
+    }
+    
+}
+
+//+------------------------------------------------------------------+
+//| give command to open or close                                    |
+//+------------------------------------------------------------------+
+int getCMD()
+{
+    
+    int CMD=6; // CMD=6 : No Action
+    /*
+        enum        |   value   |  describtion 
+        ____________|___________|__________________________      
+        OP_BUY      |   0       |  Buy operation
+        ____________|___________|__________________________
+        OP_SELL     |   1       |  Sell operation
+        ____________|___________|__________________________
+        OP_BUYLIMIT |   2       |  Buy limit pending order
+        ____________|___________|__________________________
+        OP_SELLLIMIT|   3       |  Sell limit pending order
+        ____________|___________|__________________________
+        OP_BUYSTOP  |   4       |  Buy stop pending order
+        ____________|___________|__________________________
+        OP_SELLSTOP |   5       |  Sell stop pending order
+        ____________|___________|__________________________
+        ----------- |   6       |  No Action
+        ____________|___________|__________________________
+    */ 
+
+    // Select CMD
+    // ----------
+    if(!weekend() && LS_H4.continues && (TimeHour(currentTime)<=21 && TimeHour(currentTime)>=1) //&& LS_M15.volume[1] > SecureVol
+        // && ((robotHist[0].Profit>=0 && MinutesDiff(robotHist[0].closeTime, currentTime)>14) || (robotHist[0].Profit<0 && MinutesDiff(robotHist[0].closeTime, currentTime)>20))
+        ){
+        
+        // Buy
+        // ---
+        
+        int NRisk=1;
+
+        if(!(LS_H4.AllFibo[6]>currentPrice) && (((!correlatorTest &&
+            ((buy_limit>0 && currentPrice<buy_limit) ||
+            (buy_stop>0 && currentPrice>buy_stop)))
+        // && (MinutesDiff(robotHist[0].closeTime, currentTime)>20)
+        ) // dontBuy_up<currentPrice || currentPrice<dontBuy_down || 
+        || (correlatorTest && correlat.look4Buy))
+        ){
+            CMD=OP_BUY;
+            if(currentPrice>LS_H4.MyZigPeak) {
+                NRisk=2;
+            }
+
+            currRobotBuf.StopLoss=currentPrice-(atr*0.25);
+            currRobotBuf.TakeProfit=currentPrice+(atr*2);
+            if (currRobotBuf.StopLoss > LS_H1.lowerBullCandidates[0])
+                currRobotBuf.StopLoss = LS_H1.lowerBullCandidates[0]-(atr*0.25);
+            if (MathAbs(currRobotBuf.TakeProfit - currentPrice) < MathAbs(currRobotBuf.StopLoss - currentPrice)) {
+                currRobotBuf.StopLoss = currentPrice - atr ;
+            }
+
+        }
+        
+        // Sell 
+        // ----
+        else if(!(LS_H4.AllFibo[11]<currentPrice) && (((
+            !correlatorTest &&
+            ((sell_limit>0 && currentPrice>sell_limit) ||
+            (sell_stop>0 && currentPrice<sell_stop)))
+        // && (MinutesDiff(robotHist[0].closeTime, currentTime)>20)
+        ) //dontSell_up<currentPrice || currentPrice<dontSell_down ||  
+        || (correlatorTest && correlat.look4Sell))
+        ){ 
+            CMD=OP_SELL;
+            if(currentPrice<LS_H4.MyZigLawn){
+                NRisk=2;
+            }
+            
+            currRobotBuf.StopLoss=currentPrice+(atr*0.25);
+            currRobotBuf.TakeProfit=currentPrice-(atr*2);
+            if (currRobotBuf.StopLoss< LS_H1.upperBearCandidates[0])
+                currRobotBuf.StopLoss=LS_H1.upperBearCandidates[0]+(atr*0.25);
+            if (MathAbs(currRobotBuf.TakeProfit - currentPrice) < MathAbs(currRobotBuf.StopLoss - currentPrice)) {
+                currRobotBuf.StopLoss = currentPrice + atr ;
+            }    
+            
+        }
+
+
+        lots = NormalizeDouble(AccountFreeMargin()*RiskRatio*correlat.riskFactor*NRisk/(1000.0), 2);
+        if(lots<minLot) lots=minLot;
+        
+    }
+    
+    return CMD;
+}
+
+//+------------------------------------------------------------------+
+//| --- find minimum secure volume based on PERIOD_H4 for PERIOD_M5  |
+//+------------------------------------------------------------------+
+void recalcSecureVol(){
+    long sortVol_H4[360];
+    int i;
+    int arrSize=ArraySize(sortVol_H4);
+    int sampelSize=arrSize*3/5;
+    for(i=1; i<arrSize; i++)
+        sortVol_H4[i]=iVolume(Symbol(), PERIOD_H4, i);
+    ArraySort(sortVol_H4); //sort increasingly
+    long aveLowVol=0;
+    i=0;
+    for(int j=0; j<arrSize && i<sampelSize; j++){
+        if(sortVol_H4[j]>40){
+            aveLowVol+=sortVol_H4[j];
+            i++;
+        }
+    } 
+
+    SecureVol=(double)(aveLowVol/i);
+    if(SecureVol>0){
+        Print("aveLowVol = ", SecureVol);
+        SecureVol/=48;
+        Print("SecureVol = ", SecureVol); 
+    }
+    else{
+        SecureVol=inpSecureVol;
+    }
+
+    SecureVolUpdateTime=currentTime;
+        
+}
+
+//+------------------------------------------------------------------+
+//| --- calculate time differencies between two datetime             |
+//+------------------------------------------------------------------+
+
+int DayDiff(datetime t1, datetime t2)
+{
+    return ((int)(t2 - t1) / 86400);
+}
+
+int HourDiff(datetime t1, datetime t2)
+{
+    return ((int)(t2 - t1) / 3600);
+}
+
+int MinutesDiff(datetime t1, datetime t2)
+{
+    return ((int)(t2 - t1) / 60);
+}
+
+//+------------------------------------------------------------------+
+//| --- check if it's going to weekend or market time with low activity|
+//+------------------------------------------------------------------+
+bool weekend(){
+    bool ret=false;
+    if(TimeHour(currentTime)>=21 && TimeDayOfWeek(currentTime)==5) ret=true;
+    return ret;
+}
+
+//+------------------------------------------------------------------+
+//| --- visualising object support & resistance                      |
+//+------------------------------------------------------------------+
+void Draw()
+{
+    
+    if(ObjectFind(0, "robo_buystop")<0){
+        ObjectCreate(0,"robo_buystop", OBJ_HLINE, 0, 0, 0);
+        ObjectSet("robo_buystop",OBJPROP_COLOR,clrYellow );
+        ObjectSet("robo_buystop",OBJPROP_STYLE,STYLE_DASH);
+    }
+    else
+        ObjectSet("robo_buystop",OBJPROP_PRICE1,buy_stop);
+        
+    if(ObjectFind(0, "robo_buylimit")<0){
+        ObjectCreate(0,"robo_buylimit", OBJ_HLINE, 0, 0, 0);
+        ObjectSet("robo_buylimit",OBJPROP_COLOR,clrYellow );
+        ObjectSet("robo_buylimit",OBJPROP_STYLE,STYLE_DASH);
+    }
+    else
+        ObjectSet("robo_buylimit",OBJPROP_PRICE1,buy_limit);
+        
+    if(ObjectFind(0, "robo_sellstop")<0){
+        ObjectCreate(0,"robo_sellstop", OBJ_HLINE, 0, 0, 0);
+        ObjectSet("robo_sellstop",OBJPROP_COLOR,clrLime);
+        ObjectSet("robo_sellstop",OBJPROP_STYLE,STYLE_DASH);
+    }
+    else
+        ObjectSet("robo_sellstop",OBJPROP_PRICE1,sell_stop);
+        
+    if(ObjectFind(0, "robo_selllimit")<0){
+        ObjectCreate(0,"robo_selllimit", OBJ_HLINE, 0, 0, 0);
+        ObjectSet("robo_selllimit",OBJPROP_COLOR,clrLime);
+        ObjectSet("robo_selllimit",OBJPROP_STYLE,STYLE_DASH);
+    }
+    else
+        ObjectSet("robo_selllimit",OBJPROP_PRICE1,sell_limit);
+        
+
+    if (ObjectFind(0, "IncFIBObig")<0){
+        ObjectCreate("IncFIBObig",OBJ_FIBO,0,Time[0],LS_H4.AllFibo[12],Time[8],LS_H4.AllFibo[6]);
+        ObjectSet("IncFIBObig",OBJPROP_COLOR,Blue);
+        ObjectSet("IncFIBObig",OBJPROP_WIDTH,1);
+        ObjectSet("IncFIBObig",OBJPROP_RAY,true); 
+        ObjectSet("IncFIBObig",OBJPROP_STYLE,STYLE_DOT);
+        ObjectSet("IncFIBObig",OBJPROP_BACK,true);
+        for(int i=0; i<11; i++){
+        ObjectSetInteger(0,"IncFIBObig", OBJPROP_LEVELCOLOR, i, Blue);
+        // ObjectSetInteger(0,"IncFIBObig", OBJPROP_LEVELSTYLE, i, STYLE_DASHDOTDOT);
+        }
+    } else {
+
+        ObjectSet("IncFIBObig", OBJPROP_TIME1, Time[0]); 
+        ObjectSet("IncFIBObig", OBJPROP_TIME2, Time[8]); 
+        ObjectSet("IncFIBObig", OBJPROP_PRICE1, LS_H4.AllFibo[12]); 
+        ObjectSet("IncFIBObig", OBJPROP_PRICE2, LS_H4.AllFibo[6]); 
+        // WindowRedraw();
+    }
+
+    if (ObjectFind(0, "DecFIBObig")<0){
+        ObjectCreate("DecFIBObig",OBJ_FIBO,0,Time[0],LS_H4.AllFibo[6],Time[8],LS_H4.AllFibo[12]);
+        ObjectSet("DecFIBObig",OBJPROP_COLOR,Red);
+        ObjectSet("DecFIBObig",OBJPROP_WIDTH,1);
+        ObjectSet("DecFIBObig",OBJPROP_RAY,true);  
+        ObjectSet("DecFIBObig",OBJPROP_STYLE,STYLE_DOT);
+        ObjectSet("DecFIBObig",OBJPROP_BACK,true);
+        for(int i=0; i<11; i++){
+        ObjectSetInteger(0,"DecFIBObig", OBJPROP_LEVELCOLOR, i, Red);
+        // ObjectSetInteger(0,"DecFIBObig", OBJPROP_LEVELSTYLE, i, STYLE_DASHDOTDOT);
+        }
+    } else {
+
+        ObjectSet("DecFIBObig", OBJPROP_TIME1, Time[0]); 
+        ObjectSet("DecFIBObig", OBJPROP_TIME2, Time[8]); 
+        ObjectSet("DecFIBObig", OBJPROP_PRICE1, LS_H4.AllFibo[6]); 
+        ObjectSet("DecFIBObig", OBJPROP_PRICE2, LS_H4.AllFibo[12]); 
+        // WindowRedraw();
+    }
+
+
+    if (ObjectFind(0, "FIBO")<0){
+        ObjectCreate("FIBO",OBJ_FIBO,0,Time[0],fib_5,Time[8],fib_0);
+        ObjectSet("FIBO",OBJPROP_COLOR,Orange);
+        ObjectSet("FIBO",OBJPROP_WIDTH,1);
+        ObjectSet("FIBO",OBJPROP_RAY,true); 
+        ObjectSet("FIBO",OBJPROP_STYLE,STYLE_DASH);
+        ObjectSet("FIBO",OBJPROP_BACK,true);
+    } else {
+
+        ObjectSet("FIBO", OBJPROP_TIME1, Time[0]); 
+        ObjectSet("FIBO", OBJPROP_TIME2, Time[8]); 
+        ObjectSet("FIBO", OBJPROP_PRICE1, fib_5); 
+        ObjectSet("FIBO", OBJPROP_PRICE2, fib_0); 
+        // WindowRedraw();
+    }
+
+    ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+//| check defined order                                              |
+//+------------------------------------------------------------------+
+void check_order(MyOrder& TargetOrder)
+{
+    if(OrderSelect(TargetOrder.ticketNr,SELECT_BY_TICKET)==false)
+    {
+        Print("ERROR - Unable to select the order in check_order() - ",GetLastError());
+    }
+    else
+    {
+        if(TargetOrder.openTime==0)TargetOrder.openTime=OrderOpenTime();
+        datetime ctm=OrderCloseTime();
+        // sobald die position geschlossen ist, einmal folgendes ausführen  
+        if(ctm>0){
+            TargetOrder.closeTime=ctm;
+            correlat.newTrade = false;
+            TargetOrder.closeCorr=correlat;
+            TargetOrder.closePrice = OrderClosePrice();
+            TargetOrder.Profit = OrderProfit();
+            if(TargetOrder.type==OP_BUY || TargetOrder.type==OP_BUYLIMIT || TargetOrder.type==OP_BUYSTOP){
+                TargetOrder.ProfitPoints=(TargetOrder.closePrice-TargetOrder.openPrice);
+                if(!TargetOrder.openCorr.newTrade) {
+                    TargetOrder.openCorr=correlat;
+                    TargetOrder.openCorr.newTrade=true;
+                }
+            }
+            else {
+                TargetOrder.ProfitPoints=(TargetOrder.openPrice-TargetOrder.closePrice);
+                if(TargetOrder.openCorr.newTrade) TargetOrder.openCorr.newTrade=false;
+            }
+            // history gewinn und verlust aktualisieren
+            reorderPosHistory();
+            profitUpdate();
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| check orders and positions                                       |
+//+------------------------------------------------------------------+
+void check_orders_on_init()
+{
+    int iUser=0;
+    for(int i=(OrdersTotal()-1);i>=0;i--)
+    {
+        
+        //If the order cannot be selected throw and log an error
+        if(OrderSelect(i,SELECT_BY_POS,MODE_TRADES)==false)
+        {
+            Print("ERROR - Unable to select the order - ",GetLastError());
+            break;
+        }
+        else if(OrderSymbol()==Symbol() && OrderCloseTime()==0)
+        {
+            if(OrderMagicNumber()==MAGIC_NO){
+                currRobotBuf.ticketNr=OrderTicket();
+                currRobotBuf.openTime=OrderOpenTime();
+                currRobotBuf.type=OrderType();
+                currRobotBuf.openPrice=OrderOpenPrice();
+                currRobotBuf.TakeProfit=OrderTakeProfit();
+                currRobotBuf.StopLoss=OrderStopLoss();
+                currRobotBuf.Profit=OrderProfit();
+                
+            }
+            else{
+                user[iUser].ticketNr=OrderTicket();
+                user[iUser].openTime=OrderOpenTime();
+                user[iUser].type=OrderType();
+                user[iUser].openPrice=OrderOpenPrice();
+                user[iUser].TakeProfit=OrderTakeProfit();
+                user[iUser].StopLoss=OrderStopLoss();
+                user[iUser].Profit=OrderProfit();
+                
+                iUser++;
+            }
+        }       
+    }
+    userOrderTotal=iUser;
+}
+
+
+//+------------------------------------------------------------------+
+//| reorder robotHist array                                          |
+//+------------------------------------------------------------------+
+void reorderPosHistory(){
+    for(int i = ArraySize(robotHist)-1; i>0; i--){
+        robotHist[i]=robotHist[i-1];
+    }
+    robotHist[0]=currRobotBuf;
+    rst_Order_State();
+}
+
+//+------------------------------------------------------------------+
+//| reset order monitoring states                                    |
+//+------------------------------------------------------------------+
+void rst_Order_State()
+{
+    currRobotBuf.ticketNr=-1;
+    currRobotBuf.openTime=0;
+    currRobotBuf.closeTime=0;
+    currRobotBuf.type=6;
+    currRobotBuf.openPrice=0;
+    currRobotBuf.closePrice=0;
+    currRobotBuf.TakeProfit=0;
+    currRobotBuf.StopLoss=0;
+    currRobotBuf.Profit=0;
+    currRobotBuf.ProfitPoints=0;
+}
+
+void rst_User_Order_State()
+{
+    for(int i=0; i<userOrderTotal; i++){
+        user[i].ticketNr=-1;
+        user[i].openTime=0;
+        user[i].closeTime=0;
+        user[i].type=6;
+        user[i].openPrice=0;
+        user[i].closePrice=0;
+        user[i].TakeProfit=0;
+        user[i].StopLoss=0;
+        user[i].Profit=0;
+        user[i].ProfitPoints=0;
+    }
+
+}
+
+//+------------------------------------------------------------------+
+//| Close/Modify/delete Orders or set SL & TP                        |
+//+------------------------------------------------------------------+
+void ModifyTP(int cmd, MyOrder& TargetOrder)
+{
+    if(OrderSelect(TargetOrder.ticketNr,SELECT_BY_TICKET)==false)
+    {
+        Print("ERROR - Unable to select the order in ModifyTP() - ",GetLastError());
+    }
+    else
+    {
+        double SL=0;
+        double TP=0;
+
+        double LastTP=OrderTakeProfit();
+        double LastSL=OrderStopLoss();
+
+        if((cmd == OP_BUY) && (OrderType() == OP_BUY)){ // edit TP and SL
+
+            if(TargetOrder.TakeProfit>0)        
+                TP = TargetOrder.TakeProfit;
+            else
+                TP=LastTP;
+            if(TargetOrder.StopLoss>0)
+                SL=TargetOrder.StopLoss;
+            else
+                SL=LastSL;
+            
+            SL=NormalizeDouble(SL, vdigits);
+            TP=NormalizeDouble(TP, vdigits);
+            if(SL!=LastSL||TP!=LastTP){
+                if(!OrderModify(OrderTicket(),OrderOpenPrice(),SL,TP,OrderExpiration(),Blue)){
+                int errNr=GetLastError();
+                if(errNr==1) ResetLastError();
+                else{
+                    PrintFormat("Error in TP/SL Modifying for Buy postion. Error code= %d on TargetOrder.ticketNr: %d",errNr, TargetOrder.ticketNr);
+                    Print(ErrorDescription(errNr));
+                    PrintFormat("Bid= %f and SL= %f", Bid, SL);
+                    PrintFormat("Ask= %f and TP= %f", Ask, TP);
+                    PrintFormat("Spread= %f", Spread);
+                    PrintFormat("Vdigits= %d", vdigits);
+                }
+                } 
+            }
+        }
+
+        else if((cmd== OP_SELL)&&(OrderType() == OP_SELL)){// edit TP and SL
+            if(TargetOrder.TakeProfit>0)        
+                TP = TargetOrder.TakeProfit;
+            else
+                TP=LastTP;
+            if(TargetOrder.StopLoss>0)
+                SL=TargetOrder.StopLoss;
+            else
+                SL=LastSL;
+            SL=NormalizeDouble(SL, vdigits);
+            TP=NormalizeDouble(TP, vdigits);
+            if(SL!=LastSL||TP!=LastTP){    
+                if(!OrderModify(OrderTicket(),OrderOpenPrice(),SL,TP,OrderExpiration(),Red)){
+                int errNr=GetLastError();
+                if(errNr==1) ResetLastError();
+                else{
+                    PrintFormat("Error in TP/SL Modifying for Sell postion. Error code= %d on TargetOrder.ticketNr: %d",errNr, TargetOrder.ticketNr);
+                    Print(ErrorDescription(errNr));
+                    PrintFormat("Ask= %f and SL= %f", Ask, SL);
+                    PrintFormat("Bid= %f and TP= %f", Bid, TP);
+                    PrintFormat("Spread= %f", Spread);
+                    PrintFormat("Vdigits= %d", vdigits);
+                }
+                }
+            }
+        }
+
+        else if (cmd == CLOSE_BUY)
+        {
+        if(!OrderClose(OrderTicket(),OrderLots(),Bid,3,White))
+            Print("OrderClose error ",GetLastError());
+        
+        }
+
+        else if (cmd == CLOSE_SELL)
+        {
+        if(!OrderClose(OrderTicket(),OrderLots(),Ask,3,White))
+            Print("OrderClose error ",GetLastError());
+        
+        }
+    }
+
+}
+
+
+
+
+// class Neuron {
+//     private:
+//         double weights[];  // Gewichte des Neurons
+//         double bias;       // Bias-Wert
+
+//         // Aktivierungsfunktion (Sigmoid)
+//         double activate(double x) {
+//             return 1 / (1 + MathExp(-x));
+//         }
+
+//     public:
+//         // Konstruktor: Initialisierung
+//         Neuron(int numInputs) {
+//             ArrayResize(weights, numInputs);
+//             for (int i = 0; i < numInputs; i++) {
+//                 weights[i] = MathRand() * 0.01; // Zufällige Gewichte
+//             }
+//             bias = MathRand() * 0.01; // Zufälliger Bias
+//         }
+
+//         // Berechnung des Outputs
+//         double predict(const double &inputs[]) {
+//             double sum = 0;
+//             for (int i = 0; i < ArraySize(inputs); i++) {
+//                 sum += inputs[i] * weights[i];
+//             }
+//             sum += bias; // Bias hinzufügen
+//             return activate(sum);
+//         }
+
+//         // Zugriff auf die Gewichte und den Bias
+//         double getWeight(int i) { return weights[i]; }
+//         double getBias() { return bias; }
+//         void setWeight(int i, double value) { weights[i] = value; }
+//         void setBias(double value) { bias = value; }
+//         int getNumWeights() { return ArraySize(weights); }
+// };
+
+// class Optimizer {
+//     private:
+//         string optimizationType;  // Typ des Optimierungsalgorithmus
+//         double learningRate;      // Lernrate
+//         double beta1;             // Adam/Momentum Parameter
+//         double beta2;             // Adam Parameter
+//         double epsilon;           // Stabilitätskonstante
+//         double m[];               // Momentum-Cache
+//         double v[];               // RMSProp-Cache
+//         double mBias;             // Momentum-Cache für Bias
+//         double vBias;             // RMSProp-Cache für Bias
+//         int t;                    // Iterationszähler
+
+//     public:
+//         Optimizer(double lr, string optType = "SGD", double b1 = 0.9, double b2 = 0.999, double eps = 1e-8) {
+//             learningRate = lr;
+//             optimizationType = optType;
+//             beta1 = b1;
+//             beta2 = b2;
+//             epsilon = eps;
+//             mBias = 0.0;
+//             vBias = 0.0;
+//             t = 0;
+//         }
+
+//         void applyGradients(Neuron &neuron, const double &inputs[], double error) {
+//             int numWeights = neuron.getNumWeights();
+
+//             // Initialisiere Cache-Arrays
+//             if (ArraySize(m) != numWeights) {
+//                 ArrayResize(m, numWeights);
+//                 ArrayResize(v, numWeights);
+//                 ArrayInitialize(m, 0.0);
+//                 ArrayInitialize(v, 0.0);
+//             }
+
+//             t++;
+
+//             Print("numWeights: ",numWeights);
+//             for (int i = 0; i < numWeights; i++) {
+//                 Print("i: ",i);
+//                 double grad = error * inputs[i];
+//                 if (optimizationType == "Adam") {
+//                     m[i] = beta1 * m[i] + (1 - beta1) * grad;
+//                     v[i] = beta2 * v[i] + (1 - beta2) * grad * grad;
+
+//                     double mHat = m[i] / (1 - MathPow(beta1, t));
+//                     double vHat = v[i] / (1 - MathPow(beta2, t));
+
+//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * mHat / (MathSqrt(vHat) + epsilon));
+//                 } else if (optimizationType == "Momentum") {
+//                     m[i] = beta1 * m[i] + grad;
+//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * m[i]);
+//                 } else {
+//                     neuron.setWeight(i, neuron.getWeight(i) - learningRate * grad);
+//                 }
+//             }
+
+//             double gradBias = error;
+//             if (optimizationType == "Adam") {
+//                 mBias = beta1 * mBias + (1 - beta1) * gradBias;
+//                 vBias = beta2 * vBias + (1 - beta2) * gradBias * gradBias;
+
+//                 double mHatBias = mBias / (1 - MathPow(beta1, t));
+//                 double vHatBias = vBias / (1 - MathPow(beta2, t));
+
+//                 neuron.setBias(neuron.getBias() - learningRate * mHatBias / (MathSqrt(vHatBias) + epsilon));
+//             } else if (optimizationType == "Momentum") {
+//                 mBias = beta1 * mBias + gradBias;
+//                 neuron.setBias(neuron.getBias() - learningRate * mBias);
+//             } else {
+//                 neuron.setBias(neuron.getBias() - learningRate * gradBias);
+//             }
+//         }
+// };
+
+// class Loss {
+//     private:
+//         string lossType;
+
+//     public:
+//         Loss(string type = "MSE") {
+//             lossType = type;
+//         }
+
+//         double calculateLoss(double target, double output) {
+//             if (lossType == "MSE") {
+//                 return MathPow(target - output, 2);
+//             } else if (lossType == "MAE") {
+//                 return MathAbs(target - output);
+//             } else {
+//                 Print("Unbekannter Verlusttyp: ", lossType);
+//                 return 0.0;
+//             }
+//         }
+
+//         double calculateGradient(double target, double output) {
+//             if (lossType == "MSE") {
+//                 return -2 * (target - output);
+//             } else if (lossType == "MAE") {
+//                 return (target > output) ? -1 : 1;
+//             } else {
+//                 Print("Unbekannter Verlusttyp: ", lossType);
+//                 return 0.0;
+//             }
+//         }
+// };
+
+// class Layer {
+//     private:
+//         Neuron *neurons[];  // Array von Zeigern auf Neuronen
+
+//     public:
+//         // Konstruktor: Initialisiert die Schicht mit einer bestimmten Anzahl von Neuronen
+//         void init(int numNeurons, int numInputsPerNeuron) {
+//             ArrayResize(neurons, numNeurons);
+//             for (int i = 0; i < numNeurons; i++) {
+//                 neurons[i] = new Neuron(numInputsPerNeuron); // Neuron initialisieren
+//             }
+//         }
+
+//         // Berechnet die Ausgaben der Schicht basierend auf den Eingaben
+//         void forward(double &inputs[], double &outputs[]) {
+//             ArrayResize(outputs, ArraySize(neurons));
+//             for (int i = 0; i < ArraySize(neurons); i++) {
+//                 outputs[i] = neurons[i].predict(inputs);
+//             }
+//         }
+
+//         // Zugriff auf Neuronen
+//         Neuron *getNeuron(int index) {
+//             if (index >= 0 && index < ArraySize(neurons)) {
+//                 return neurons[index];
+//             }
+//             return NULL;
+//         }
+
+//         int getNumNeurons() {
+//             return ArraySize(neurons);
+//         }
+
+//         // Zerstörer: Löscht alle Neuronen in der Schicht
+//         ~Layer() {
+//             for (int i = 0; i < ArraySize(neurons); i++) {
+//                 delete neurons[i];
+//             }
+//         }
+// };
+
+
+// class SequentialModel {
+//     private:
+//         Layer *layers[];          // Array von Zeigern auf Layer
+//         Optimizer *optimizer;     // Zeiger auf den Optimierungsalgorithmus
+//         Loss *lossFunction;       // Zeiger auf die Verlustfunktion
+
+//     public:
+//         // Konstruktor: Initialisiert das Modell
+//         void init(Optimizer &opt, Loss &loss) {
+//             optimizer = &opt;      // Optimierer zuweisen
+//             lossFunction = &loss; // Verlustfunktion zuweisen
+//         }
+
+//         // Fügt eine Schicht zum Modell hinzu
+//         void addLayer(int numNeurons, int numInputsPerNeuron = 0) {
+//             Layer *newLayer = new Layer;
+//             int numInputs = (ArraySize(layers) > 0) ? layers[ArraySize(layers) - 1].getNumNeurons() : numInputsPerNeuron;
+//             newLayer.init(numNeurons, numInputs);
+//             ArrayResize(layers, ArraySize(layers) + 1);
+//             layers[ArraySize(layers) - 1] = newLayer;
+//         }
+
+//         // Führt einen Vorwärtsdurchlauf durch
+//         // void predict(double &inputs[], double &outputs[]) {
+//         //     double tempInputs[];
+//         //     double tempOutputs[];
+//         //     ArrayCopy(tempInputs, inputs);
+
+//         //     for (int i = 0; i < ArraySize(layers); i++) {
+//         //         layers[i].forward(tempInputs, tempOutputs);
+//         //         ArrayCopy(tempInputs, tempOutputs); // Übertrag der Ausgaben als Eingaben für die nächste Schicht
+//         //     }
+
+//         //     ArrayResize(outputs, ArraySize(tempOutputs));
+//         //     ArrayCopy(outputs, tempOutputs);
+//         // }
+
+//         void predict(double &inputs[], double &outputs[]) {
+//             double tempInputs[];
+//             double tempOutputs[];
+//             ArrayCopy(tempInputs, inputs); // Eingaben kopieren
+
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 layers[i].forward(tempInputs, tempOutputs); // Vorwärtsdurchlauf
+//                 ArrayResize(tempInputs, ArraySize(tempOutputs));
+//                 ArrayCopy(tempInputs, tempOutputs); // Ausgaben als Eingaben weitergeben
+//             }
+
+//             ArrayResize(outputs, ArraySize(tempOutputs));
+//             ArrayCopy(outputs, tempOutputs); // Finale Ausgaben kopieren
+//         }
+
+//         // Trainingsmethode
+//         void train(double &inputs[], double target, int epochs) {
+//             double outputs[];
+
+//             for (int epoch = 0; epoch < epochs; epoch++) {
+//                 // Vorhersage
+//                 predict(inputs, outputs);
+
+//                 // Verlust und Fehler berechnen
+//                 double lossValue = lossFunction.calculateLoss(target, outputs[0]);
+//                 double error = lossFunction.calculateGradient(target, outputs[0]);
+
+//                 // Backpropagation durch alle Schichten
+//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+//                         Neuron *neuron = layers[i].getNeuron(j);
+//                         optimizer.applyGradients(*neuron, inputs, error);
+//                     }
+//                 }
+
+//                 // Ausgabe für Monitoring
+//                 if (epoch % 100 == 0) {
+//                     Print("Epoch: ", epoch, ", Loss: ", lossValue);
+//                 }
+//             }
+//         }
+
+//         // Trainingsmethode mit Early Stopping
+//         void trainWithEarlyStopping(
+//             double &inputs[],
+//             double target,
+//             double tolerance,
+//             int maxEpochs,
+//             int minTolPassCont2Stop
+//         ) {
+//             double outputs[];       // Vorhersage-Ausgaben
+//             int epoch = 0;          // Epochenzähler
+//             int cntTolPass = 0;     // Toleranzpass-Zähler
+//             double error = 0;       // Fehlerwert
+//             double lossValue = 0;   // Verlustwert
+
+//             while (epoch < maxEpochs) {
+//                 // Vorhersage
+//                 predict(inputs, outputs);
+
+//                 // Verlust und Fehler berechnen
+//                 lossValue = lossFunction.calculateLoss(target, outputs[0]);
+//                 error = lossFunction.calculateGradient(target, outputs[0]);
+
+//                 // Backpropagation durch alle Schichten
+//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+//                         Neuron *neuron = layers[i].getNeuron(j);
+//                         optimizer.applyGradients(*neuron, inputs, error);
+//                     }
+//                 }
+
+//                 // Epochenzähler erhöhen
+//                 epoch++;
+
+//                 // Überprüfen, ob der Fehler innerhalb der Toleranz liegt
+//                 if (MathAbs(error) <= tolerance) {
+//                     cntTolPass++;
+//                 } else {
+//                     cntTolPass = 0; // Zurücksetzen, wenn Fehler außerhalb der Toleranz liegt
+//                 }
+
+//                 // Wenn die Bedingung für kontinuierliche Toleranz erfüllt ist, abbrechen
+//                 if (cntTolPass >= minTolPassCont2Stop) {
+//                     Print("Frühes Stoppen nach ", epoch, " Epochen. Verlust: ", lossValue, ", Fehler: ", error);
+//                     break;
+//                 }
+
+//                 // Optional: Fortschritt ausgeben
+//                 if (epoch % 100 == 0) {
+//                     Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
+//                 }
+//             }
+
+//             // Abschlussausgabe
+//             Print("Training abgeschlossen nach ", epoch, " Epochen mit Verlust: ", lossValue, ", Fehler: ", error);
+//         }
+
+//         // Zerstörer: Löscht alle Layer im Modell
+//         ~SequentialModel() {
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 delete layers[i];
+//             }
+//         }
+// };
+
+// class FunctionalModel {
+//     private:
+//         Layer *layers[];   // Array von Layer-Zeigern
+//         string connections[]; // Verbindungen der Schichten, z. B. "Layer1 -> Layer2"
+//         int inputSize;     // Eingabedimension
+//         int outputSize;    // Ausgabedimension
+
+//     public:
+//         // Konstruktor: Initialisiert ein funktionales Modell
+//         FunctionalModel(int inputDim) {
+//             inputSize = inputDim;
+//             outputSize = 0; // Wird später beim Hinzufügen der Schichten definiert
+//         }
+
+//         // Fügt eine neue Schicht hinzu
+//         void addLayer(Layer &layer, int outputDim) {
+//             ArrayResize(layers, ArraySize(layers) + 1);
+//             layers[ArraySize(layers) - 1] = &layer;
+//             outputSize = outputDim; // Setzt die Ausgabedimension basierend auf der letzten Schicht
+//         }
+
+//         // Verbindet zwei Schichten
+//         void connectLayers(string from, string to) {
+//             ArrayResize(connections, ArraySize(connections) + 1);
+//             connections[ArraySize(connections) - 1] = from + " -> " + to;
+//         }
+
+//         // Führt einen Forward-Pass durch
+//         void forward(double &inputs[], double &outputs[]) {
+//             double currentInputs[];
+//             ArrayCopy(currentInputs, inputs);
+
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 double tempOutputs[];
+//                 layers[i].forward(currentInputs, tempOutputs);
+//                 ArrayCopy(currentInputs, tempOutputs); // Ausgaben der aktuellen Schicht sind Eingaben der nächsten Schicht
+//             }
+
+//             ArrayResize(outputs, ArraySize(currentInputs));
+//             ArrayCopy(outputs, currentInputs);
+//         }
+
+//         // Trainingsmethode
+//         void train(double &inputs[], double target, Optimizer &optimizer, Loss &loss, int epochs) {
+//             for (int epoch = 0; epoch < epochs; epoch++) {
+//                 double outputs[];
+//                 forward(inputs, outputs);
+
+//                 // Verlust und Fehler berechnen
+//                 double lossValue = loss.calculateLoss(target, outputs[0]);
+//                 double error = loss.calculateGradient(target, outputs[0]);
+
+//                 // Backpropagation durch alle Schichten
+//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+//                         Neuron *neuron = layers[i].getNeuron(j);
+//                         optimizer.applyGradients(*neuron, inputs, error);
+//                     }
+//                 }
+
+//                 // Ausgabe für Fortschritt
+//                 if (epoch % 100 == 0) {
+//                     Print("Epoch: ", epoch, ", Loss: ", lossValue);
+//                 }
+//             }
+//         }
+
+//         // Zeigt die Verbindungen zwischen den Schichten
+//         void printConnections() {
+//             for (int i = 0; i < ArraySize(connections); i++) {
+//                 Print(connections[i]);
+//             }
+//         }
+// };
+
+
+// class Modelauto {
+//     private:
+//         Layer *layers[];          // Array von Zeigern auf Layer
+//         Optimizer *optimizer;     // Zeiger auf den Optimierungsalgorithmus
+//         Loss *lossFunction;       // Zeiger auf die Verlustfunktion
+//         int inputSize;            // Größe der Eingabeschicht
+//         int outputSize;           // Größe der Ausgabeschicht
+
+//     public:
+//         // Konstruktor: Initialisiert das Modell
+//         void init(Optimizer &opt, Loss &loss) {
+//             optimizer = &opt;      // Optimierer zuweisen
+//             lossFunction = &loss; // Verlustfunktion zuweisen
+//             inputSize = 0;         // Standardmäßig keine Eingabeschicht
+//             outputSize = 0;        // Standardmäßig keine Ausgabeschicht
+//         }
+
+//         // Automatische Initialisierung der Eingabegröße
+//         void setInputSize(int size) {
+//             inputSize = size;
+//         }
+
+//         // Automatische Initialisierung der Ausgabegröße
+//         void setOutputSize(int size) {
+//             outputSize = size;
+//         }
+
+//         // Fügt eine Schicht zum Modell hinzu
+//         void addLayer(int numNeurons, int numInputsPerNeuron = 0) {
+//             Layer *newLayer = new Layer;
+//             int numInputs = (ArraySize(layers) > 0) ? layers[ArraySize(layers) - 1].getNumNeurons() : inputSize;
+//             newLayer.init(numNeurons, numInputs);
+//             ArrayResize(layers, ArraySize(layers) + 1);
+//             layers[ArraySize(layers) - 1] = newLayer;
+//         }
+
+//         // Führt einen Vorwärtsdurchlauf durch
+//         void predict(double &inputs[], double &outputs[]) {
+//             if (ArraySize(layers) == 0) {
+//                 Print("Keine Schichten im Modell definiert!");
+//                 return;
+//             }
+
+//             double tempInputs[];
+//             double tempOutputs[];
+//             ArrayCopy(tempInputs, inputs);
+
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 layers[i].forward(tempInputs, tempOutputs);
+//                 ArrayCopy(tempInputs, tempOutputs); // Übertrag der Ausgaben als Eingaben für die nächste Schicht
+//             }
+
+//             ArrayResize(outputs, ArraySize(tempOutputs));
+//             ArrayCopy(outputs, tempOutputs);
+//         }
+
+//         // Automatische Erstellung von Eingabe- und Ausgabeschichten
+//         void buildAuto(double &inputs[], double &targets[]) {
+//             if (inputSize == 0) {
+//                 inputSize = ArraySize(inputs);
+//             }
+//             if (outputSize == 0) {
+//                 outputSize = ArraySize(targets);
+//             }
+
+//             // Eingabeschicht erstellen
+//             if (ArraySize(layers) == 0) {
+//                 addLayer(inputSize, 0); // Die Eingabeschicht mit der Größe der Eingabedaten
+//             }
+
+//             // Sicherstellen, dass die letzte Schicht die Ausgabeschicht ist
+//             if (ArraySize(layers) > 0 && layers[ArraySize(layers) - 1].getNumNeurons() != outputSize) {
+//                 addLayer(outputSize, layers[ArraySize(layers) - 1].getNumNeurons());
+//             }
+
+//             Print("Modell automatisch erstellt: Eingabegröße: ", inputSize, ", Ausgabegröße: ", outputSize);
+//         }
+
+//         // Trainingsmethode
+//         void train(double &inputs[], double &targets[], int epochs) {
+//             if (ArraySize(layers) == 0) {
+//                 Print("Keine Schichten im Modell definiert!");
+//                 return;
+//             }
+
+//             if (outputSize != ArraySize(targets)) {
+//                 Print("Fehler: Die Ausgabeschichtgröße stimmt nicht mit der Zielgröße überein!");
+//                 return;
+//             }
+
+//             double outputs[];
+
+//             for (int epoch = 0; epoch < epochs; epoch++) {
+//                 // Vorhersage
+//                 predict(inputs, outputs);
+
+//                 for (int i = 0; i < outputSize; i++) {
+//                     // Verlust und Fehler berechnen
+//                     double lossValue = lossFunction.calculateLoss(targets[i], outputs[i]);
+//                     double error = lossFunction.calculateGradient(targets[i], outputs[i]);
+
+//                     // Backpropagation durch alle Schichten
+//                     for (int j = ArraySize(layers) - 1; j >= 0; j--) {
+//                         for (int k = 0; k < layers[j].getNumNeurons(); k++) {
+//                             Neuron *neuron = layers[j].getNeuron(k);
+//                             optimizer.applyGradients(*neuron, inputs, error);
+//                         }
+//                     }
+
+//                     // Ausgabe für Monitoring
+//                     if (epoch % 100 == 0 && i == 0) {
+//                         Print("Epoch: ", epoch, ", Loss: ", lossValue);
+//                     }
+//                 }
+//             }
+//         }
+
+//         // Trainingsmethode mit Early Stopping
+//         void trainWithEarlyStopping(
+//             double &inputs[],
+//             double target,
+//             double tolerance,
+//             int maxEpochs,
+//             int minTolPassCont2Stop
+//         ) {
+//             double outputs[];       // Vorhersage-Ausgaben
+//             int epoch = 0;          // Epochenzähler
+//             int cntTolPass = 0;     // Toleranzpass-Zähler
+//             double error = 0;       // Fehlerwert
+//             double lossValue = 0;   // Verlustwert
+
+//             while (epoch < maxEpochs) {
+//                 // Vorhersage
+//                 predict(inputs, outputs);
+
+//                 // Verlust und Fehler berechnen
+//                 lossValue = lossFunction.calculateLoss(target, outputs[0]);
+//                 error = lossFunction.calculateGradient(target, outputs[0]);
+
+//                 // Backpropagation durch alle Schichten
+//                 for (int i = ArraySize(layers) - 1; i >= 0; i--) {
+//                     for (int j = 0; j < layers[i].getNumNeurons(); j++) {
+//                         Neuron *neuron = layers[i].getNeuron(j);
+//                         optimizer.applyGradients(*neuron, inputs, error);
+//                     }
+//                 }
+
+//                 // Epochenzähler erhöhen
+//                 epoch++;
+
+//                 // Überprüfen, ob der Fehler innerhalb der Toleranz liegt
+//                 if (MathAbs(error) <= tolerance) {
+//                     cntTolPass++;
+//                 } else {
+//                     cntTolPass = 0; // Zurücksetzen, wenn Fehler außerhalb der Toleranz liegt
+//                 }
+
+//                 // Wenn die Bedingung für kontinuierliche Toleranz erfüllt ist, abbrechen
+//                 if (cntTolPass >= minTolPassCont2Stop) {
+//                     Print("Frühes Stoppen nach ", epoch, " Epochen. Verlust: ", lossValue, ", Fehler: ", error);
+//                     break;
+//                 }
+
+//                 // Optional: Fortschritt ausgeben
+//                 if (epoch % 100 == 0) {
+//                     Print("Epoch: ", epoch, ", Verlust: ", lossValue, ", Fehler: ", error);
+//                 }
+//             }
+
+//             // Abschlussausgabe
+//             Print("Training abgeschlossen nach ", epoch, " Epochen mit Verlust: ", lossValue, ", Fehler: ", error);
+//         }
+
+//         // Zerstörer: Löscht alle Layer im Modell
+//         ~Modelauto() {
+//             for (int i = 0; i < ArraySize(layers); i++) {
+//                 delete layers[i];
+//             }
+//         }
+// };
