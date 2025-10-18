@@ -1243,8 +1243,6 @@ void PrintAllSessionData() {
     );
 }
 
-
-
 //+------------------------------------------------------------------+
 //| LeoSensors                                                       |
 //+------------------------------------------------------------------+
@@ -1315,6 +1313,7 @@ class LeoSensors{
 
     double MACD_Sig[5];
     double MACD_Main[5];
+    double RSI[5];
 
     int MACD_Trend;
 
@@ -1863,7 +1862,8 @@ class LeoSensors{
             // update MACD history
             MACD_Main[0]=iMACD(Symbol(), timeframe, 12, 26, 9, PRICE_CLOSE, MODE_MAIN, 0);
             MACD_Sig[0]=iMACD(Symbol(), timeframe, 12, 26, 9, PRICE_CLOSE, MODE_SIGNAL, 0);
-            
+            RSI[0]=iRSI(Symbol(), timeframe, 14, PRICE_CLOSE, 0);
+
             MA_Trend[0]=iMA(Symbol(), timeframe, MA_TREND_PERIOD, 0, MODE_LWMA, PRICE_WEIGHTED, 0);
             MA_Cut[0]=iMA(Symbol(), timeframe, MA_CUT_PERIOD, 0, MODE_LWMA, PRICE_WEIGHTED, 0);
             
@@ -1886,10 +1886,11 @@ class LeoSensors{
             MaUpdateBar=iBars(Symbol(), timeframe);
             updateCandelRS();
 
-            // update MACD history
+            // update MACD and RSI history
             for (uchar shift=0; shift<ArraySize(MACD_Main); shift++){
                 MACD_Main[shift]=iMACD(Symbol(), timeframe, 12, 26, 9, PRICE_CLOSE, MODE_MAIN, shift);
                 MACD_Sig[shift]=iMACD(Symbol(), timeframe, 12, 26, 9, PRICE_CLOSE, MODE_SIGNAL, shift);
+                RSI[shift]=iRSI(Symbol(), timeframe, 14, PRICE_CLOSE, shift);
             }
             
             
@@ -2100,7 +2101,6 @@ class Correlator {
 
         string modelFile;           // Pfad zur Model-Datei
         bool   volModelInitialized; // Initialisierungs-Flag
-        void updateKIAnalyse();
 
 	public:
         bool newTrade;
@@ -2509,63 +2509,6 @@ class Correlator {
         if(atr<ls[3].atr)atr=ls[3].atr;
     }
 
-    void Correlator::updateKIAnalyse()
-    {
-        // // 1) Lade oder initialisiere das Modell
-        // if(!volModelInitialized)
-        // {
-        //     modelFile = symFolder + "\\volModel.bin"; // Pfad zur Model-Datei
-        //     if(FileIsExist(modelFile))
-        //         volModel.load(modelFile);
-        //     else
-        //         volModel.init(/*Hyperparams*/);
-
-        //     volModelInitialized = true;
-        // }
-
-        // // 2) Feature-Berechnung
-        // double currATR = ls[0].atr;
-        // double features[] = {
-        //     currATR,
-        //     ls[1].atr,
-        //     ls[2].atr,
-        //     // … ggf. weitere Sensor-Werte …
-        // };
-
-        // // 3) Vorhersage & Realität
-        // double pred = volModel.predict(features);
-        // double nextATR = iATR(Symbol(),0,ATR_PERIOD,1);
-        // bool   isJump  = (nextATR > 2.0 * currATR);
-        // double realLabel = isJump ? 1.0 : 0.0;
-
-        // // 4) Phasenkategorisierung
-        // enum Phase { BUY, BUY_RALLY, SELL, SELL_RALLY } phase;
-        // bool trendBuy = /* deine Buy-Logik */;
-        // if(trendBuy)
-        //     phase = isJump ? BUY_RALLY : BUY;
-        // else
-        //     phase = isJump ? SELL_RALLY : SELL;
-
-        // // 5) Rekursives Training, wenn Prognose ungenügend
-        // double ratio = pred > 0
-        //     ? min(pred, nextATR) / max(pred, nextATR)
-        //     : 0;
-        // if(ratio < 0.7)
-        // {
-        //     volModel.train(features, &realLabel, 1);
-        //     volModel.save(modelFile);
-        // }
-
-        // // 6) Ergebnis in deine Order-Logik einspeisen
-        // switch(phase)
-        // {
-        //     case BUY:        look4Buy = true;        break;
-        //     case BUY_RALLY:  if(positionOpen) closeBuyPosition();  break;
-        //     case SELL:       look4Sell = true;       break;
-        //     case SELL_RALLY: if(positionOpen) closeSellPosition(); break;
-        // }
-    }
-
 	void Correlator::updateCorrelator() {
         
         filterBuyLevel = 0;
@@ -2578,22 +2521,53 @@ class Correlator {
         // -> Zonen-Gewichtung ermitteln
         double zoneWeight = 0.0;
         switch(activeSession.alignment) {
-            case ALL_ALIGN_BUY:         zoneWeight = 1.2; break;
-            case ALL_ALIGN_SELL:        zoneWeight = 1.2; break;
-            case TWO_DOM_ONE_CORR_BUY:  zoneWeight = 1.0; break;
-            case TWO_DOM_ONE_CORR_SELL: zoneWeight = 1.0; break;
-            case ONE_DOM_TWO_CORR_BUY:  zoneWeight = 0.8; break;
-            case ONE_DOM_TWO_CORR_SELL: zoneWeight = 0.8; break;
-            case NO_CLEAR_PATTERN:      zoneWeight = 0.0; break;
+            case ALL_ALIGN_BUY:
+                zoneWeight = 1.2; 
+                // looking for momentum to open a buy-position until reach the target of the day
+                break;
+            case ALL_ALIGN_SELL:
+                zoneWeight = 1.2; 
+                // looking for momentum to open a sell-position until reach the target of the day
+                break;
+            case TWO_DOM_ONE_CORR_BUY:
+                zoneWeight = 1.0; 
+                if(activeSession.phase == PHASE_SELL) {
+                    // looking for deepest price
+                }
+                else if(activeSession.phase == PHASE_BUY) {
+                    // looking for highest price to exit from buy (close the buy-positions) 
+                }
+                break;
+            case TWO_DOM_ONE_CORR_SELL: 
+                zoneWeight = 1.0; 
+                if(activeSession.phase == PHASE_SELL) {
+                    // looking for deepest price to exit from sell (close the sell-positions)
+                }
+                else if(activeSession.phase == PHASE_BUY) {
+                    // looking for highest price 
+                }
+                break;
+            case ONE_DOM_TWO_CORR_BUY:  
+                zoneWeight = 0.8; 
+                if(activeSession.phase == PHASE_SELL) {
+                    // looking for deepest price
+                }
+                else if(activeSession.phase == PHASE_BUY) {
+                    // looking for highest price to exit from buy (close the buy-positions) 
+                }
+                break;
+            case ONE_DOM_TWO_CORR_SELL:
+                zoneWeight = 0.8;
+                if(activeSession.phase == PHASE_SELL) {
+                    // looking for deepest price to exit from sell (close the sell-positions)
+                }
+                else if(activeSession.phase == PHASE_BUY) {
+                    // looking for highest price 
+                }
+                break;
         }
-        // Feinanpassung je nach Phase
-        if(activeSession.phase == PHASE_BUY || activeSession.phase == PHASE_SELL)      zoneWeight *= 1.1;
-        else if(activeSession.phase == PHASE_CORR_IN_BUY || activeSession.phase == PHASE_CORR_IN_SELL)  zoneWeight *= 0.7;
-        else if(activeSession.phase == PHASE_NEUTRAL)   zoneWeight *= 0.5;
-        // sonst PHASE_NEUTRAL: zoneWeight bleibt
-        
 
-        // 3) Sensor-Daten ziehen
+        // Sensor-Daten ziehen
         ls[0]=LS_M5;  ls[1]=LS_M15;  ls[2]=LS_M30;
         ls[3]=LS_H1;  ls[4]=LS_H4;
 
@@ -2729,7 +2703,6 @@ class Correlator {
         CorrelateMACDStochastic();
         atr = MathAbs(atr);
 
-        updateKIAnalyse();
 
         if (zoneWeight==0) {
             look4Sell = false;
@@ -2760,25 +2733,7 @@ class Correlator {
             }
             
         }
-
-
-
-        // riskFactor=zoneWeight;
         
-        // if(movePhase == PHASE_BUY || movePhase == PHASE_CORR_IN_SELL){
-        //     look4Buy=true;
-        //     look4Sell = false;
-        // }
-        // else if(movePhase == PHASE_SELL || movePhase == PHASE_CORR_IN_BUY){
-        //     look4Buy=false;
-        //     look4Sell = true;
-        // }
-        // else{
-        //     look4Buy=false;
-        //     look4Sell = false;
-        // }
-        
-
 	}
 
 Correlator correlat;
