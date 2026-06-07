@@ -312,13 +312,13 @@ void LeoSensors::updateLeo(void){
         volume[0] = iVolume(Symbol(), timeframe, 0);
 
         // update_candelFibos
-        // fibo_candel[0] = set_fibo(iHigh(Symbol(), timeframe, 1), iLow(Symbol(), timeframe, 1));
+        fibo_candel[0] = set_fibo(iHigh(Symbol(), timeframe, 1), iLow(Symbol(), timeframe, 1));
         posFibo_candel[0]=pos_in_fibo(currentPrice, fibo_candel[0]);
         
         // update_zigFibos
-        // fibo_zig[0] = set_fibo(zig_zag[3], zig_zag[2]);
+        fibo_zig[0] = set_fibo(zig_zag[3], zig_zag[2]);
         posFibo_zig[0]=pos_in_fibo(currentPrice, fibo_zig[0]);
-        // fibo_zig_sensitive[0] = set_fibo(zig_zag_sensitive[3], zig_zag_sensitive[2]);
+        fibo_zig_sensitive[0] = set_fibo(zig_zag_sensitive[3], zig_zag_sensitive[2]);
         posFibo_zig_sen[0]=pos_in_fibo(currentPrice, fibo_zig_sensitive[0]);
         
     }
@@ -432,9 +432,6 @@ struct TFSignal {
     int timeframe;
     int trendDir;
     int breakoutDir;
-    int breakoutDirZig;
-    int breakoutDirZigSensitive;
-    int breakoutDirCandel;
     int exhaustionDir;
     int swingDir;
     double support;
@@ -568,8 +565,6 @@ input bool PendingTrapModifyOncePerM5Bar = true;
 input int PendingTrapMinModifySeconds = 300;
 input double PendingTrapMinModifyATR = 0.20;
 input bool PendingStopAllowCloserEntry = false;
-input bool PendingStopAvoidTrendChase = true;
-input bool LowerTFControlsStopEntry = true;
 input bool PendingTrapAllowRiskIncrease = false;
 input bool AvoidWeakM30FiboTrapZones = true;
 input bool AvoidWeakTrapRiskBand = true;
@@ -645,15 +640,8 @@ double SellFiboTrailCandidate(double minAllowedSL);
 bool StrongCloseInvalidation(int orderType);
 void NormalizeTradePlanTargets(TradePlan& plan);
 bool TradePlanHasValidTargets(TradePlan& plan);
-int FiboBreakoutDirection(posFibo& currentFibo, posFibo& previousFibo);
-void AddNearestFiboLevels(fibonacci& fibos, double price, double& support, double& resistance);
-void BuildFiboSupportResistance(LeoSensors& LS, double& support, double& resistance);
 void AnalyseLeoSensor(LeoSensors& LS, TFSignal& sig);
 void BuildTFRelation(TFSignal& smallSig, TFSignal& bigSig, TFRelation& rel);
-bool LowerTFBuyRecoveryReady();
-bool LowerTFSellRecoveryReady();
-double BuildBuyStopTrapFromLowerTF(double& sl, double& tp1);
-double BuildSellStopTrapFromLowerTF(double& sl, double& tp1);
 void BuildTradePlan();
 void ApplyTradePlanToOrderSlots();
 bool ApplyOrModifyExistingPendingPlan();
@@ -909,9 +897,6 @@ void profitUpdate()
 {
 }
 
-//+------------------------------------------------------------------+
-//| event csv schedule plan                                          |
-//+------------------------------------------------------------------+
 bool EnsureCsvFolder()
 {
     if(csvFolderName != "")
@@ -1093,10 +1078,10 @@ bool IsNewsWindowActive()
     return false;
 }
 
-//+------------------------------------------------------------------+
-//| event csv schedule plan                                          |
-//+------------------------------------------------------------------+
-
+bool IsLimitOrderCmd(int cmd)
+{
+    return cmd==OP_BUYLIMIT || cmd==OP_SELLLIMIT;
+}
 
 bool IsStopOrderCmd(int cmd)
 {
@@ -1192,9 +1177,58 @@ string CurrentTradeCluster(int cmd)
     return "TREND_TRAP";
 }
 
-//+------------------------------------------------------------------+
-//| optimization record                                              |
-//+------------------------------------------------------------------+
+bool OptimizationFiltersAllowPlan(int cmd)
+{
+    if(OptimizationBreakoutOnly && IsLimitOrderCmd(cmd))
+        return false;
+
+    double riskAtr = 0;
+    if(sig_M30.atr > 0)
+        riskAtr = CurrentPlanRiskM30ATR();
+
+    if(IsStopOrderCmd(cmd)){
+        int activeM30Fibo = LS_M30.posFibo_candel[0].aktive_fibo_index;
+        double rangeAtr = CurrentM30RangeATR();
+        int breakoutStack = DirectionalBreakoutStack(robotPlan.direction);
+        int exhaustionStack = DirectionalExhaustionStack(robotPlan.direction);
+
+        if(AvoidWeakM30FiboTrapZones && (activeM30Fibo==10 || activeM30Fibo==13))
+            return false;
+
+        if(AvoidWeakTrapRiskBand && riskAtr >= WeakTrapRiskBandMinM30ATR && riskAtr <= WeakTrapRiskBandMaxM30ATR)
+            return false;
+
+        if(AvoidCompressedStopRange && rangeAtr > 0 && rangeAtr < CompressedStopRangeMaxM30ATR)
+            return false;
+
+        if(AvoidWideNoConfirmStop && rangeAtr >= WideNoConfirmMinM30ATR && breakoutStack==0 && exhaustionStack==0)
+            return false;
+    }
+
+    if(EnableRangeRelativeBreakout){
+        int breakoutStack = DirectionalBreakoutStack(robotPlan.direction);
+        int exhaustionStack = DirectionalExhaustionStack(robotPlan.direction);
+        double rangeAtr = CurrentM30RangeATR();
+
+        if(MaxDirectionalExhaustionStack >= 0 && exhaustionStack > MaxDirectionalExhaustionStack)
+            return false;
+
+        if(rangeAtr > 0 && breakoutStack==0){
+            if(rangeAtr < RangeRelativeMinM30ATR)
+                return false;
+            if(rangeAtr > RangeRelativeMaxM30ATR && rangeAtr < AmbiguousRangeMaxM30ATR)
+                return false;
+        }
+    }
+
+    if(MinPlanRiskM30ATR > 0 && sig_M30.atr > 0){
+        if(riskAtr > 0 && riskAtr < MinPlanRiskM30ATR)
+            return false;
+    }
+
+    return true;
+}
+
 void CsvAddString(string& line, string value)
 {
     StringReplace(value, "\r", " ");
@@ -1243,9 +1277,6 @@ void CsvAddSensorHeader(string& line, string prefix)
     CsvAddString(line, prefix+"_fibo_half_active");
     CsvAddString(line, prefix+"_trend_dir");
     CsvAddString(line, prefix+"_breakout_dir");
-    CsvAddString(line, prefix+"_breakout_zig_dir");
-    CsvAddString(line, prefix+"_breakout_zig_sensitive_dir");
-    CsvAddString(line, prefix+"_breakout_candel_dir");
     CsvAddString(line, prefix+"_exhaustion_dir");
     CsvAddString(line, prefix+"_swing_dir");
 }
@@ -1275,9 +1306,6 @@ void CsvAddSensorValues(string& line, LeoSensors& LS, TFSignal& sig)
     CsvAddInt(line, LS.posFibo_candel[0].fibo_half_line_is_aktive ? 1 : 0);
     CsvAddInt(line, sig.trendDir);
     CsvAddInt(line, sig.breakoutDir);
-    CsvAddInt(line, sig.breakoutDirZig);
-    CsvAddInt(line, sig.breakoutDirZigSensitive);
-    CsvAddInt(line, sig.breakoutDirCandel);
     CsvAddInt(line, sig.exhaustionDir);
     CsvAddInt(line, sig.swingDir);
 }
@@ -1595,106 +1623,6 @@ void checkClose()
     
 }
 
-void ManageRobotTargets()
-{
-    if(activeRobotPlan.planType==PLAN_NONE)
-        return;
-
-    double minDistance = TradeMinDistance();
-
-    if(aktiveRobotOrder.type==OP_BUY){
-        if(StrongCloseInvalidation(OP_BUY)){
-            Print("Closing OP_BUY: strong H1/M30/M15 invalidation against active plan");
-            ModifyTP(CLOSE_BUY, aktiveRobotOrder);
-            return;
-        }
-
-        double initialRiskBuy = 0;
-        if(activeRobotPlan.targets.entry > 0 && activeRobotPlan.targets.slInitial > 0)
-            initialRiskBuy = activeRobotPlan.targets.entry - activeRobotPlan.targets.slInitial;
-
-        double profitDistanceBuy = currentPrice - activeRobotPlan.targets.entry;
-        bool allowProtectBuy = (initialRiskBuy > 0 && profitDistanceBuy >= initialRiskBuy*TrailStartRiskRatio);
-
-        if(activeRobotPlan.targets.tp1 > 0 && currentPrice >= activeRobotPlan.targets.tp1 && activeRobotPlan.targets.activeTarget < 2)
-            activeRobotPlan.targets.activeTarget = 2;
-        if(activeRobotPlan.targets.tp2 > 0 && currentPrice >= activeRobotPlan.targets.tp2 && activeRobotPlan.targets.activeTarget < 3)
-            activeRobotPlan.targets.activeTarget = 3;
-
-        if((activeRobotPlan.targets.activeTarget >= 2 || allowProtectBuy) && activeRobotPlan.targets.entry > 0){
-            double beBufferBuy = MathMax(minStopLevel + spread, FiboRiskBuffer(sig_M15.atr)*BreakEvenBufferATR);
-            double breakEvenBuy = activeRobotPlan.targets.entry + beBufferBuy;
-            double maxAllowedBuySL = Bid - minDistance;
-            if(breakEvenBuy <= maxAllowedBuySL)
-                aktiveRobotOrder.StopLoss = MathMax(aktiveRobotOrder.StopLoss, breakEvenBuy);
-        }
-
-        if(activeRobotPlan.targets.activeTarget >= 2 || allowProtectBuy){
-            double maxTrailBuy = Bid - minDistance;
-            double fiboTrailBuy = BuyFiboTrailCandidate(maxTrailBuy);
-            if(fiboTrailBuy > 0 && fiboTrailBuy > aktiveRobotOrder.StopLoss)
-                aktiveRobotOrder.StopLoss = fiboTrailBuy;
-        }
-
-        if(activeRobotPlan.targets.activeTarget >= 3 && activeRobotPlan.targets.tp3 > 0)
-            aktiveRobotOrder.TakeProfit = activeRobotPlan.targets.tp3;
-        else if(activeRobotPlan.targets.activeTarget >= 2 && activeRobotPlan.targets.tp2 > 0)
-            aktiveRobotOrder.TakeProfit = activeRobotPlan.targets.tp2;
-
-        ModifyTP(OP_BUY, aktiveRobotOrder);
-    }
-    else if(aktiveRobotOrder.type==OP_SELL){
-        if(StrongCloseInvalidation(OP_SELL)){
-            Print("Closing OP_SELL: strong H1/M30/M15 invalidation against active plan");
-            ModifyTP(CLOSE_SELL, aktiveRobotOrder);
-            return;
-        }
-
-        double initialRiskSell = 0;
-        if(activeRobotPlan.targets.entry > 0 && activeRobotPlan.targets.slInitial > 0)
-            initialRiskSell = activeRobotPlan.targets.slInitial - activeRobotPlan.targets.entry;
-
-        double profitDistanceSell = activeRobotPlan.targets.entry - currentPrice;
-        bool allowProtectSell = (initialRiskSell > 0 && profitDistanceSell >= initialRiskSell*TrailStartRiskRatio);
-
-        if(activeRobotPlan.targets.tp1 > 0 && currentPrice <= activeRobotPlan.targets.tp1 && activeRobotPlan.targets.activeTarget < 2)
-            activeRobotPlan.targets.activeTarget = 2;
-        if(activeRobotPlan.targets.tp2 > 0 && currentPrice <= activeRobotPlan.targets.tp2 && activeRobotPlan.targets.activeTarget < 3)
-            activeRobotPlan.targets.activeTarget = 3;
-
-        if((activeRobotPlan.targets.activeTarget >= 2 || allowProtectSell) && activeRobotPlan.targets.entry > 0){
-            double beBufferSell = MathMax(minStopLevel + spread, FiboRiskBuffer(sig_M15.atr)*BreakEvenBufferATR);
-            double breakEvenSell = activeRobotPlan.targets.entry - beBufferSell;
-            double minAllowedSellSL = Ask + minDistance;
-            if(breakEvenSell >= minAllowedSellSL){
-                if(aktiveRobotOrder.StopLoss <= 0)
-                    aktiveRobotOrder.StopLoss = breakEvenSell;
-                else
-                    aktiveRobotOrder.StopLoss = MathMin(aktiveRobotOrder.StopLoss, breakEvenSell);
-            }
-        }
-
-        if(activeRobotPlan.targets.activeTarget >= 2 || allowProtectSell){
-            double minTrailSell = Ask + minDistance;
-            double fiboTrailSell = SellFiboTrailCandidate(minTrailSell);
-            if(fiboTrailSell > 0){
-                if(aktiveRobotOrder.StopLoss <= 0)
-                    aktiveRobotOrder.StopLoss = fiboTrailSell;
-                else if(fiboTrailSell < aktiveRobotOrder.StopLoss)
-                    aktiveRobotOrder.StopLoss = fiboTrailSell;
-            }
-        }
-
-        if(activeRobotPlan.targets.activeTarget >= 3 && activeRobotPlan.targets.tp3 > 0)
-            aktiveRobotOrder.TakeProfit = activeRobotPlan.targets.tp3;
-        else if(activeRobotPlan.targets.activeTarget >= 2 && activeRobotPlan.targets.tp2 > 0)
-            aktiveRobotOrder.TakeProfit = activeRobotPlan.targets.tp2;
-
-        ModifyTP(OP_SELL, aktiveRobotOrder);
-    }
-}
-
-
 //+------------------------------------------------------------------+
 //| give command to open or close                                    |
 //+------------------------------------------------------------------+
@@ -1788,63 +1716,6 @@ int getCMD()
     return CMD;
 }
 
-bool OptimizationFiltersAllowPlan(int cmd)
-{
-    if(OptimizationBreakoutOnly && IsLimitOrderCmd(cmd))
-        return false;
-
-    double riskAtr = 0;
-    if(sig_M30.atr > 0)
-        riskAtr = CurrentPlanRiskM30ATR();
-
-    if(IsStopOrderCmd(cmd)){
-        int activeM30Fibo = LS_M30.posFibo_candel[0].aktive_fibo_index;
-        double rangeAtr = CurrentM30RangeATR();
-        int breakoutStack = DirectionalBreakoutStack(robotPlan.direction);
-        int exhaustionStack = DirectionalExhaustionStack(robotPlan.direction);
-
-        if(AvoidWeakM30FiboTrapZones && (activeM30Fibo==10 || activeM30Fibo==13))
-            return false;
-
-        if(AvoidWeakTrapRiskBand && riskAtr >= WeakTrapRiskBandMinM30ATR && riskAtr <= WeakTrapRiskBandMaxM30ATR)
-            return false;
-
-        if(AvoidCompressedStopRange && rangeAtr > 0 && rangeAtr < CompressedStopRangeMaxM30ATR)
-            return false;
-
-        if(AvoidWideNoConfirmStop && rangeAtr >= WideNoConfirmMinM30ATR && breakoutStack==0 && exhaustionStack==0)
-            return false;
-    }
-
-    if(EnableRangeRelativeBreakout){
-        int breakoutStack = DirectionalBreakoutStack(robotPlan.direction);
-        int exhaustionStack = DirectionalExhaustionStack(robotPlan.direction);
-        double rangeAtr = CurrentM30RangeATR();
-
-        if(MaxDirectionalExhaustionStack >= 0 && exhaustionStack > MaxDirectionalExhaustionStack)
-            return false;
-
-        if(rangeAtr > 0 && breakoutStack==0){
-            if(rangeAtr < RangeRelativeMinM30ATR)
-                return false;
-            if(rangeAtr > RangeRelativeMaxM30ATR && rangeAtr < AmbiguousRangeMaxM30ATR)
-                return false;
-        }
-    }
-
-    if(MinPlanRiskM30ATR > 0 && sig_M30.atr > 0){
-        if(riskAtr > 0 && riskAtr < MinPlanRiskM30ATR)
-            return false;
-    }
-
-    return true;
-}
-
-bool IsLimitOrderCmd(int cmd)
-{
-    return cmd==OP_BUYLIMIT || cmd==OP_SELLLIMIT;
-}
-
 //+------------------------------------------------------------------+
 //| --- find minimum secure volume based on PERIOD_H4 for PERIOD_M5  |
 //+------------------------------------------------------------------+
@@ -1898,6 +1769,43 @@ int MinutesDiff(datetime t1, datetime t2)
     return ((int)(t2 - t1) / 60);
 }
 
+void ResetSignalEvent(SignalEvent& sig)
+{
+    sig.type = SIG_NONE;
+    sig.timeframe = 0;
+    sig.direction = DIR_NONE;
+    sig.level = 0;
+    sig.invalidLevel = 0;
+    sig.targetLevel = 0;
+    sig.strength = 0;
+    sig.time = 0;
+    sig.reason = "";
+}
+
+void ResetTargetMap(TargetMap& targets)
+{
+    targets.entry = 0;
+    targets.slInitial = 0;
+    targets.slCurrent = 0;
+    targets.tp1 = 0;
+    targets.tp2 = 0;
+    targets.tp3 = 0;
+    targets.trailLevel = 0;
+    targets.activeTarget = 0;
+}
+
+void ResetTradePlan(TradePlan& plan)
+{
+    plan.planType = PLAN_NONE;
+    plan.cmd = 6;
+    plan.direction = DIR_NONE;
+    plan.confidence = 0;
+    ResetSignalEvent(plan.triggerSignal);
+    ResetSignalEvent(plan.invalidationSignal);
+    ResetSignalEvent(plan.targetSignal);
+    ResetSignalEvent(plan.managementSignal);
+    ResetTargetMap(plan.targets);
+}
 
 double TradeMinDistance()
 {
@@ -2099,79 +2007,15 @@ bool TradePlanHasValidTargets(TradePlan& plan)
     return true;
 }
 
-int FiboBreakoutDirection(posFibo& currentFibo, posFibo& previousFibo)
-{
-    double minMove = MathMax(Point, minStopLevel);
-
-    bool buyBreakout = (currentFibo.fibo_resistance > 0
-                        && previousFibo.fibo_resistance > 0
-                        && currentFibo.fibo_resistance > previousFibo.fibo_resistance + minMove);
-    bool sellBreakout = (currentFibo.fibo_support > 0
-                         && previousFibo.fibo_support > 0
-                         && currentFibo.fibo_support < previousFibo.fibo_support - minMove);
-
-    if(buyBreakout && !sellBreakout)
-        return DIR_BUY;
-    if(sellBreakout && !buyBreakout)
-        return DIR_SELL;
-
-    if(buyBreakout && sellBreakout){
-        double resistanceMove = currentFibo.fibo_resistance - previousFibo.fibo_resistance;
-        double supportMove = previousFibo.fibo_support - currentFibo.fibo_support;
-        if(resistanceMove > supportMove + minMove)
-            return DIR_BUY;
-        if(supportMove > resistanceMove + minMove)
-            return DIR_SELL;
-    }
-
-    return DIR_NONE;
-}
-
-void AddNearestFiboLevels(fibonacci& fibos, double price, double& support, double& resistance)
-{
-    for(int i=0; i<ArraySize(fibos.fibo); i++){
-        double level = fibos.fibo[i];
-        if(level <= 0)
-            continue;
-
-        if(level < price && (support <= 0 || level > support))
-            support = level;
-        else if(level > price && (resistance <= 0 || level < resistance))
-            resistance = level;
-    }
-}
-
-void BuildFiboSupportResistance(LeoSensors& LS, double& support, double& resistance)
-{
-    support = 0;
-    resistance = 0;
-
-    for(int i=0; i<ArraySize(LS.fibo_zig); i++)
-        AddNearestFiboLevels(LS.fibo_zig[i], currentPrice, support, resistance);
-
-    for(int j=0; j<ArraySize(LS.fibo_zig_sensitive); j++)
-        AddNearestFiboLevels(LS.fibo_zig_sensitive[j], currentPrice, support, resistance);
-
-    for(int k=0; k<ArraySize(LS.fibo_candel); k++)
-        AddNearestFiboLevels(LS.fibo_candel[k], currentPrice, support, resistance);
-
-    if(support <= 0)
-        support = LS.posFibo_candel[0].fibo_support;
-    if(resistance <= 0)
-        resistance = LS.posFibo_candel[0].fibo_resistance;
-}
-
 void AnalyseLeoSensor(LeoSensors& LS, TFSignal& sig)
 {
     sig.timeframe = LS.timeframe;
     sig.trendDir = DIR_NONE;
     sig.breakoutDir = DIR_NONE;
-    sig.breakoutDirZig = DIR_NONE;
-    sig.breakoutDirZigSensitive = DIR_NONE;
-    sig.breakoutDirCandel = DIR_NONE;
     sig.exhaustionDir = DIR_NONE;
     sig.swingDir = DIR_NONE;
-    BuildFiboSupportResistance(LS, sig.support, sig.resistance);
+    sig.support = LS.posFibo_candel[0].fibo_support;
+    sig.resistance = LS.posFibo_candel[0].fibo_resistance;
     sig.atr = LS.atr[0];
     sig.rsi = LS.rsi[0];
     sig.stochMain = LS.stoch_main[0];
@@ -2192,29 +2036,13 @@ void AnalyseLeoSensor(LeoSensors& LS, TFSignal& sig)
         sig.trendScore = 1;
     }
 
-    sig.breakoutDirZig = FiboBreakoutDirection(LS.posFibo_zig[0], LS.posFibo_zig[1]);
-    sig.breakoutDirZigSensitive = FiboBreakoutDirection(LS.posFibo_zig_sen[0], LS.posFibo_zig_sen[1]);
-    sig.breakoutDirCandel = FiboBreakoutDirection(LS.posFibo_candel[0], LS.posFibo_candel[1]);
-
-    int buyBreakouts = 0;
-    int sellBreakouts = 0;
-
-    if(sig.breakoutDirZig==DIR_BUY) buyBreakouts++;
-    else if(sig.breakoutDirZig==DIR_SELL) sellBreakouts++;
-
-    if(sig.breakoutDirZigSensitive==DIR_BUY) buyBreakouts++;
-    else if(sig.breakoutDirZigSensitive==DIR_SELL) sellBreakouts++;
-
-    if(sig.breakoutDirCandel==DIR_BUY) buyBreakouts++;
-    else if(sig.breakoutDirCandel==DIR_SELL) sellBreakouts++;
-
-    if(buyBreakouts > sellBreakouts){
+    if(sig.resistance > 0 && currentPrice > sig.resistance){
         sig.breakoutDir = DIR_BUY;
-        sig.breakoutScore = buyBreakouts;
+        sig.breakoutScore = 1;
     }
-    else if(sellBreakouts > buyBreakouts){
+    else if(sig.support > 0 && currentPrice < sig.support){
         sig.breakoutDir = DIR_SELL;
-        sig.breakoutScore = sellBreakouts;
+        sig.breakoutScore = 1;
     }
 
     if(LS.zig_zag[2] > LS.zig_zag[3])
@@ -2227,9 +2055,7 @@ void AnalyseLeoSensor(LeoSensors& LS, TFSignal& sig)
     else if(LS.rsi[0] < 30 || LS.stoch_main[0] < 20)
         sig.exhaustionDir = DIR_SELL;
 
-    if(LS.posFibo_candel[0].fibo_line_is_aktive || LS.posFibo_candel[0].fibo_half_line_is_aktive
-       || LS.posFibo_zig[0].fibo_line_is_aktive || LS.posFibo_zig[0].fibo_half_line_is_aktive
-       || LS.posFibo_zig_sen[0].fibo_line_is_aktive || LS.posFibo_zig_sen[0].fibo_half_line_is_aktive)
+    if(LS.posFibo_candel[0].fibo_line_is_aktive || LS.posFibo_candel[0].fibo_half_line_is_aktive)
         sig.fiboScore = 1;
 }
 
@@ -2253,10 +2079,10 @@ void BuildTFRelation(TFSignal& smallSig, TFSignal& bigSig, TFRelation& rel)
         rel.trendAgreement = -smallSig.trendDir;
     }
 
-    if(smallSig.breakoutDir != DIR_NONE && bigSig.trendDir != DIR_NONE && smallSig.breakoutDir != bigSig.trendDir)
-        rel.breakoutAgainstBig = smallSig.breakoutDir;
-    else if(bigSig.breakoutDir != DIR_NONE)
-        rel.breakoutAgainstBig = bigSig.breakoutDir;
+    if(bigSig.resistance > 0 && currentPrice > bigSig.resistance)
+        rel.breakoutAgainstBig = DIR_BUY;
+    else if(bigSig.support > 0 && currentPrice < bigSig.support)
+        rel.breakoutAgainstBig = DIR_SELL;
 
     if(bigSig.trendDir == DIR_BUY && smallSig.exhaustionDir == DIR_SELL && bigSig.support > 0 && currentPrice >= bigSig.support)
         rel.pullbackToBig = DIR_BUY;
@@ -2327,7 +2153,7 @@ bool BuildRangeRelativeBreakoutPlan(double buyScore, double sellScore)
         if(sig_M5.support > 0 && sig_M5.support < entry)
             baseSupport = sig_M5.support;
         if(sig_M15.support > 0 && sig_M15.support < entry)
-            baseSupport = (baseSupport>0 ? MathMax(baseSupport, sig_M15.support) : sig_M15.support);
+            baseSupport = (baseSupport>0 ? MathMin(baseSupport, sig_M15.support) : sig_M15.support);
 
         if(baseSupport <= 0)
             return false;
@@ -2361,7 +2187,7 @@ bool BuildRangeRelativeBreakoutPlan(double buyScore, double sellScore)
         if(sig_M5.resistance > entry)
             baseResistanceSell = sig_M5.resistance;
         if(sig_M15.resistance > entry)
-            baseResistanceSell = (baseResistanceSell>0 ? MathMin(baseResistanceSell, sig_M15.resistance) : sig_M15.resistance);
+            baseResistanceSell = (baseResistanceSell>0 ? MathMax(baseResistanceSell, sig_M15.resistance) : sig_M15.resistance);
 
         if(baseResistanceSell <= 0)
             return false;
@@ -2403,164 +2229,6 @@ bool BuildRangeRelativeBreakoutPlan(double buyScore, double sellScore)
     return true;
 }
 
-bool LowerTFBuyRecoveryReady()
-{
-    if(sig_M5.swingDir==DIR_BUY || sig_M15.swingDir==DIR_BUY)
-        return true;
-    if(sig_M5.breakoutDir==DIR_BUY || sig_M15.breakoutDir==DIR_BUY)
-        return true;
-    if(sig_M5.trendDir==DIR_BUY && sig_M15.trendDir!=DIR_SELL)
-        return true;
-    if(sig_M15.trendDir==DIR_BUY && sig_M5.trendDir!=DIR_SELL)
-        return true;
-    if(sig_M5.rsi >= 45 && sig_M5.stochMain > sig_M5.stochSignal)
-        return true;
-    if(sig_M15.rsi >= 45 && sig_M15.stochMain > sig_M15.stochSignal)
-        return true;
-
-    return false;
-}
-
-bool LowerTFSellRecoveryReady()
-{
-    if(sig_M5.swingDir==DIR_SELL || sig_M15.swingDir==DIR_SELL)
-        return true;
-    if(sig_M5.breakoutDir==DIR_SELL || sig_M15.breakoutDir==DIR_SELL)
-        return true;
-    if(sig_M5.trendDir==DIR_SELL && sig_M15.trendDir!=DIR_BUY)
-        return true;
-    if(sig_M15.trendDir==DIR_SELL && sig_M5.trendDir!=DIR_BUY)
-        return true;
-    if(sig_M5.rsi <= 55 && sig_M5.stochMain < sig_M5.stochSignal)
-        return true;
-    if(sig_M15.rsi <= 55 && sig_M15.stochMain < sig_M15.stochSignal)
-        return true;
-
-    return false;
-}
-
-double BuildBuyStopTrapFromLowerTF(double& sl, double& tp1)
-{
-    sl = 0;
-    tp1 = 0;
-
-    if(!LowerTFBuyRecoveryReady())
-        return 0;
-
-    double baseResistance = 0;
-    double entryAtr = 0;
-
-    if(sig_M5.resistance > Ask + minStopLevel){
-        baseResistance = sig_M5.resistance;
-        entryAtr = sig_M5.atr;
-    }
-    if(sig_M15.resistance > Ask + minStopLevel && (baseResistance<=0 || sig_M15.resistance < baseResistance)){
-        baseResistance = sig_M15.resistance;
-        entryAtr = sig_M15.atr;
-    }
-
-    if(baseResistance <= 0)
-        return 0;
-
-    if(entryAtr <= 0)
-        entryAtr = (sig_M15.atr > 0 ? sig_M15.atr : sig_M30.atr);
-
-    double entry = baseResistance + BreakoutEntryBuffer(entryAtr);
-    double baseSupport = 0;
-    double slAtr = 0;
-
-    if(sig_M5.support > 0 && sig_M5.support < entry){
-        baseSupport = sig_M5.support;
-        slAtr = sig_M5.atr;
-    }
-    if(sig_M15.support > 0 && sig_M15.support < entry && (baseSupport<=0 || sig_M15.support > baseSupport)){
-        baseSupport = sig_M15.support;
-        slAtr = sig_M15.atr;
-    }
-    if(baseSupport <= 0 && sig_M30.support > 0 && sig_M30.support < entry){
-        baseSupport = sig_M30.support;
-        slAtr = sig_M30.atr;
-    }
-
-    if(baseSupport > 0){
-        if(slAtr <= 0)
-            slAtr = (sig_M15.atr > 0 ? sig_M15.atr : sig_M30.atr);
-        sl = baseSupport - FiboRiskBuffer(slAtr);
-    }
-
-    if(sig_M30.resistance > entry)
-        tp1 = sig_M30.resistance;
-    if(sig_H1.resistance > entry && (tp1<=0 || sig_H1.resistance < tp1))
-        tp1 = sig_H1.resistance;
-    if(sig_H4.resistance > entry && (tp1<=0 || sig_H4.resistance < tp1))
-        tp1 = sig_H4.resistance;
-    if(tp1 <= entry && sl > 0)
-        tp1 = entry + MathMax(entry-sl, TradeMinDistance());
-
-    return NormalizeDouble(entry, vdigits);
-}
-
-double BuildSellStopTrapFromLowerTF(double& sl, double& tp1)
-{
-    sl = 0;
-    tp1 = 0;
-
-    if(!LowerTFSellRecoveryReady())
-        return 0;
-
-    double baseSupport = 0;
-    double entryAtr = 0;
-
-    if(sig_M5.support > 0 && sig_M5.support < Bid - minStopLevel){
-        baseSupport = sig_M5.support;
-        entryAtr = sig_M5.atr;
-    }
-    if(sig_M15.support > 0 && sig_M15.support < Bid - minStopLevel && (baseSupport<=0 || sig_M15.support > baseSupport)){
-        baseSupport = sig_M15.support;
-        entryAtr = sig_M15.atr;
-    }
-
-    if(baseSupport <= 0)
-        return 0;
-
-    if(entryAtr <= 0)
-        entryAtr = (sig_M15.atr > 0 ? sig_M15.atr : sig_M30.atr);
-
-    double entry = baseSupport - BreakoutEntryBuffer(entryAtr);
-    double baseResistance = 0;
-    double slAtr = 0;
-
-    if(sig_M5.resistance > entry){
-        baseResistance = sig_M5.resistance;
-        slAtr = sig_M5.atr;
-    }
-    if(sig_M15.resistance > entry && (baseResistance<=0 || sig_M15.resistance < baseResistance)){
-        baseResistance = sig_M15.resistance;
-        slAtr = sig_M15.atr;
-    }
-    if(baseResistance <= 0 && sig_M30.resistance > entry){
-        baseResistance = sig_M30.resistance;
-        slAtr = sig_M30.atr;
-    }
-
-    if(baseResistance > 0){
-        if(slAtr <= 0)
-            slAtr = (sig_M15.atr > 0 ? sig_M15.atr : sig_M30.atr);
-        sl = baseResistance + FiboRiskBuffer(slAtr);
-    }
-
-    if(sig_M30.support > 0 && sig_M30.support < entry)
-        tp1 = sig_M30.support;
-    if(sig_H1.support > 0 && sig_H1.support < entry && (tp1<=0 || sig_H1.support > tp1))
-        tp1 = sig_H1.support;
-    if(sig_H4.support > 0 && sig_H4.support < entry && (tp1<=0 || sig_H4.support > tp1))
-        tp1 = sig_H4.support;
-    if((tp1 <= 0 || tp1 >= entry) && sl > 0)
-        tp1 = entry - MathMax(sl-entry, TradeMinDistance());
-
-    return NormalizeDouble(entry, vdigits);
-}
-
 void BuildTradePlan()
 {
     ResetTradePlan(robotPlan);
@@ -2588,8 +2256,8 @@ void BuildTradePlan()
         return;
     }
 
-    bool mainBuyTrend = (sig_H4.trendDir == DIR_BUY && sig_H1.trendDir == DIR_BUY && sig_M30.trendDir != DIR_SELL);
-    bool mainSellTrend = (sig_H4.trendDir == DIR_SELL && sig_H1.trendDir == DIR_SELL && sig_M30.trendDir != DIR_BUY);
+    bool mainBuyTrend = (sig_H4.trendDir == DIR_BUY && sig_H1.trendDir == DIR_BUY);
+    bool mainSellTrend = (sig_H4.trendDir == DIR_SELL && sig_H1.trendDir == DIR_SELL);
 
     if(mainBuyTrend && buyScore > sellScore + 1){
         robotPlan.planType = PLAN_TREND_CONT;
@@ -2609,22 +2277,19 @@ void BuildTradePlan()
         bool buyPullback = BuyPullbackExpected();
         double buyMaxPullback = sig_M30.atr > 0 ? sig_M30.atr*MaxPullbackEntryATR : 0;
 
-        if(LowerTFControlsStopEntry)
-            buyStopEntry = BuildBuyStopTrapFromLowerTF(buyStopSL, buyStopTP1);
-
-        if(buyStopEntry <= 0 && sig_M15.resistance > Ask + minStopLevel){
-            double buyEntryBufferM15 = BreakoutEntryBuffer(sig_M15.atr);
-            double buyStopBufferM15 = FiboRiskBuffer(sig_M15.atr);
-            buyStopEntry = sig_M15.resistance + buyEntryBufferM15;
-            buyStopSL = sig_M15.support > 0 ? sig_M15.support - buyStopBufferM15 : 0;
-            buyStopTP1 = sig_M30.resistance;
-        }
-        else if(buyStopEntry <= 0 && sig_M30.resistance > Ask + minStopLevel){
+        if(sig_M30.resistance > Ask + minStopLevel){
             double buyEntryBufferM30 = BreakoutEntryBuffer(sig_M30.atr);
             double buyStopBufferM30 = FiboRiskBuffer(sig_M30.atr);
             buyStopEntry = sig_M30.resistance + buyEntryBufferM30;
             buyStopSL = sig_M30.support > 0 ? sig_M30.support - buyStopBufferM30 : 0;
             buyStopTP1 = sig_H1.resistance;
+        }
+        else if(sig_M15.resistance > Ask + minStopLevel){
+            double buyEntryBufferM15 = BreakoutEntryBuffer(sig_M15.atr);
+            double buyStopBufferM15 = FiboRiskBuffer(sig_M15.atr);
+            buyStopEntry = sig_M15.resistance + buyEntryBufferM15;
+            buyStopSL = sig_M15.support > 0 ? sig_M15.support - buyStopBufferM15 : 0;
+            buyStopTP1 = sig_M30.resistance;
         }
 
         if(sig_M15.support > 0
@@ -2743,22 +2408,19 @@ void BuildTradePlan()
         bool sellPullback = SellPullbackExpected();
         double sellMaxPullback = sig_M30.atr > 0 ? sig_M30.atr*MaxPullbackEntryATR : 0;
 
-        if(LowerTFControlsStopEntry)
-            sellStopEntry = BuildSellStopTrapFromLowerTF(sellStopSL, sellStopTP1);
-
-        if(sellStopEntry <= 0 && sig_M15.support > 0 && sig_M15.support < Bid - minStopLevel){
-            double sellEntryBufferM15 = BreakoutEntryBuffer(sig_M15.atr);
-            double sellStopBufferM15 = FiboRiskBuffer(sig_M15.atr);
-            sellStopEntry = sig_M15.support - sellEntryBufferM15;
-            sellStopSL = sig_M15.resistance > 0 ? sig_M15.resistance + sellStopBufferM15 : 0;
-            sellStopTP1 = sig_M30.support;
-        }
-        else if(sellStopEntry <= 0 && sig_M30.support > 0 && sig_M30.support < Bid - minStopLevel){
+        if(sig_M30.support > 0 && sig_M30.support < Bid - minStopLevel){
             double sellEntryBufferM30 = BreakoutEntryBuffer(sig_M30.atr);
             double sellStopBufferM30 = FiboRiskBuffer(sig_M30.atr);
             sellStopEntry = sig_M30.support - sellEntryBufferM30;
             sellStopSL = sig_M30.resistance > 0 ? sig_M30.resistance + sellStopBufferM30 : 0;
             sellStopTP1 = sig_H1.support;
+        }
+        else if(sig_M15.support > 0 && sig_M15.support < Bid - minStopLevel){
+            double sellEntryBufferM15 = BreakoutEntryBuffer(sig_M15.atr);
+            double sellStopBufferM15 = FiboRiskBuffer(sig_M15.atr);
+            sellStopEntry = sig_M15.support - sellEntryBufferM15;
+            sellStopSL = sig_M15.resistance > 0 ? sig_M15.resistance + sellStopBufferM15 : 0;
+            sellStopTP1 = sig_M30.support;
         }
 
         if(sig_M15.resistance > Bid + minStopLevel
@@ -2905,9 +2567,6 @@ double PendingTrapMinModifyMove()
     return MathMax(Point, atr*PendingTrapMinModifyATR);
 }
 
-
-
-
 datetime PendingTrapLastModifyBar(int cmd)
 {
     if(cmd==OP_BUYLIMIT)  return lastBuyLimitModifyBar;
@@ -2945,13 +2604,7 @@ bool PendingTrapMoveAllowed(int cmd, MyOrder& existingOrder)
     double minMove = PendingTrapMinModifyMove();
     double newEntry = robotPlan.targets.entry;
 
-    if(PendingStopAvoidTrendChase && IsStopOrderCmd(cmd)){
-        if(cmd==OP_BUYSTOP && newEntry > existingOrder.openPrice+minMove)
-            return false;
-        if(cmd==OP_SELLSTOP && newEntry < existingOrder.openPrice-minMove)
-            return false;
-    }
-    else if(!PendingStopAllowCloserEntry){
+    if(!PendingStopAllowCloserEntry){
         if(cmd==OP_BUYSTOP && newEntry < existingOrder.openPrice-minMove)
             return false;
         if(cmd==OP_SELLSTOP && newEntry > existingOrder.openPrice+minMove)
@@ -3161,7 +2814,131 @@ bool PendingSignalStillValid(int cmd)
     return false;
 }
 
+void DeleteInvalidPendingOrders()
+{
+    if(pending_buy_limit.ticketNr > -1 && !PendingSignalStillValid(OP_BUYLIMIT)){
+        Print("Deleting stale OP_BUYLIMIT: pending signal is no longer valid");
+        ModifyTP(DELETE_PENDING, pending_buy_limit);
+        ResetOrder(pending_buy_limit);
+    }
 
+    if(pending_buy_stop.ticketNr > -1 && !PendingSignalStillValid(OP_BUYSTOP)){
+        Print("Deleting stale OP_BUYSTOP: pending signal is no longer valid");
+        ModifyTP(DELETE_PENDING, pending_buy_stop);
+        ResetOrder(pending_buy_stop);
+    }
+
+    if(pending_sell_limit.ticketNr > -1 && !PendingSignalStillValid(OP_SELLLIMIT)){
+        Print("Deleting stale OP_SELLLIMIT: pending signal is no longer valid");
+        ModifyTP(DELETE_PENDING, pending_sell_limit);
+        ResetOrder(pending_sell_limit);
+    }
+
+    if(pending_sell_stop.ticketNr > -1 && !PendingSignalStillValid(OP_SELLSTOP)){
+        Print("Deleting stale OP_SELLSTOP: pending signal is no longer valid");
+        ModifyTP(DELETE_PENDING, pending_sell_stop);
+        ResetOrder(pending_sell_stop);
+    }
+}
+
+void ManageRobotTargets()
+{
+    if(activeRobotPlan.planType==PLAN_NONE)
+        return;
+
+    double minDistance = TradeMinDistance();
+
+    if(aktiveRobotOrder.type==OP_BUY){
+        if(StrongCloseInvalidation(OP_BUY)){
+            Print("Closing OP_BUY: strong H1/M30/M15 invalidation against active plan");
+            ModifyTP(CLOSE_BUY, aktiveRobotOrder);
+            return;
+        }
+
+        double initialRiskBuy = 0;
+        if(activeRobotPlan.targets.entry > 0 && activeRobotPlan.targets.slInitial > 0)
+            initialRiskBuy = activeRobotPlan.targets.entry - activeRobotPlan.targets.slInitial;
+
+        double profitDistanceBuy = currentPrice - activeRobotPlan.targets.entry;
+        bool allowProtectBuy = (initialRiskBuy > 0 && profitDistanceBuy >= initialRiskBuy*TrailStartRiskRatio);
+
+        if(activeRobotPlan.targets.tp1 > 0 && currentPrice >= activeRobotPlan.targets.tp1 && activeRobotPlan.targets.activeTarget < 2)
+            activeRobotPlan.targets.activeTarget = 2;
+        if(activeRobotPlan.targets.tp2 > 0 && currentPrice >= activeRobotPlan.targets.tp2 && activeRobotPlan.targets.activeTarget < 3)
+            activeRobotPlan.targets.activeTarget = 3;
+
+        if((activeRobotPlan.targets.activeTarget >= 2 || allowProtectBuy) && activeRobotPlan.targets.entry > 0){
+            double beBufferBuy = MathMax(minStopLevel + spread, FiboRiskBuffer(sig_M15.atr)*BreakEvenBufferATR);
+            double breakEvenBuy = activeRobotPlan.targets.entry + beBufferBuy;
+            double maxAllowedBuySL = Bid - minDistance;
+            if(breakEvenBuy <= maxAllowedBuySL)
+                aktiveRobotOrder.StopLoss = MathMax(aktiveRobotOrder.StopLoss, breakEvenBuy);
+        }
+
+        if(activeRobotPlan.targets.activeTarget >= 2 || allowProtectBuy){
+            double maxTrailBuy = Bid - minDistance;
+            double fiboTrailBuy = BuyFiboTrailCandidate(maxTrailBuy);
+            if(fiboTrailBuy > 0 && fiboTrailBuy > aktiveRobotOrder.StopLoss)
+                aktiveRobotOrder.StopLoss = fiboTrailBuy;
+        }
+
+        if(activeRobotPlan.targets.activeTarget >= 3 && activeRobotPlan.targets.tp3 > 0)
+            aktiveRobotOrder.TakeProfit = activeRobotPlan.targets.tp3;
+        else if(activeRobotPlan.targets.activeTarget >= 2 && activeRobotPlan.targets.tp2 > 0)
+            aktiveRobotOrder.TakeProfit = activeRobotPlan.targets.tp2;
+
+        ModifyTP(OP_BUY, aktiveRobotOrder);
+    }
+    else if(aktiveRobotOrder.type==OP_SELL){
+        if(StrongCloseInvalidation(OP_SELL)){
+            Print("Closing OP_SELL: strong H1/M30/M15 invalidation against active plan");
+            ModifyTP(CLOSE_SELL, aktiveRobotOrder);
+            return;
+        }
+
+        double initialRiskSell = 0;
+        if(activeRobotPlan.targets.entry > 0 && activeRobotPlan.targets.slInitial > 0)
+            initialRiskSell = activeRobotPlan.targets.slInitial - activeRobotPlan.targets.entry;
+
+        double profitDistanceSell = activeRobotPlan.targets.entry - currentPrice;
+        bool allowProtectSell = (initialRiskSell > 0 && profitDistanceSell >= initialRiskSell*TrailStartRiskRatio);
+
+        if(activeRobotPlan.targets.tp1 > 0 && currentPrice <= activeRobotPlan.targets.tp1 && activeRobotPlan.targets.activeTarget < 2)
+            activeRobotPlan.targets.activeTarget = 2;
+        if(activeRobotPlan.targets.tp2 > 0 && currentPrice <= activeRobotPlan.targets.tp2 && activeRobotPlan.targets.activeTarget < 3)
+            activeRobotPlan.targets.activeTarget = 3;
+
+        if((activeRobotPlan.targets.activeTarget >= 2 || allowProtectSell) && activeRobotPlan.targets.entry > 0){
+            double beBufferSell = MathMax(minStopLevel + spread, FiboRiskBuffer(sig_M15.atr)*BreakEvenBufferATR);
+            double breakEvenSell = activeRobotPlan.targets.entry - beBufferSell;
+            double minAllowedSellSL = Ask + minDistance;
+            if(breakEvenSell >= minAllowedSellSL){
+                if(aktiveRobotOrder.StopLoss <= 0)
+                    aktiveRobotOrder.StopLoss = breakEvenSell;
+                else
+                    aktiveRobotOrder.StopLoss = MathMin(aktiveRobotOrder.StopLoss, breakEvenSell);
+            }
+        }
+
+        if(activeRobotPlan.targets.activeTarget >= 2 || allowProtectSell){
+            double minTrailSell = Ask + minDistance;
+            double fiboTrailSell = SellFiboTrailCandidate(minTrailSell);
+            if(fiboTrailSell > 0){
+                if(aktiveRobotOrder.StopLoss <= 0)
+                    aktiveRobotOrder.StopLoss = fiboTrailSell;
+                else if(fiboTrailSell < aktiveRobotOrder.StopLoss)
+                    aktiveRobotOrder.StopLoss = fiboTrailSell;
+            }
+        }
+
+        if(activeRobotPlan.targets.activeTarget >= 3 && activeRobotPlan.targets.tp3 > 0)
+            aktiveRobotOrder.TakeProfit = activeRobotPlan.targets.tp3;
+        else if(activeRobotPlan.targets.activeTarget >= 2 && activeRobotPlan.targets.tp2 > 0)
+            aktiveRobotOrder.TakeProfit = activeRobotPlan.targets.tp2;
+
+        ModifyTP(OP_SELL, aktiveRobotOrder);
+    }
+}
 
 //+------------------------------------------------------------------+
 //| --- check if it's going to weekend or market time with low activity|
@@ -3374,44 +3151,6 @@ void reorderPosHistory()
 //+------------------------------------------------------------------+
 //| reset order monitoring states                                    |
 //+------------------------------------------------------------------+
-void ResetSignalEvent(SignalEvent& sig)
-{
-    sig.type = SIG_NONE;
-    sig.timeframe = 0;
-    sig.direction = DIR_NONE;
-    sig.level = 0;
-    sig.invalidLevel = 0;
-    sig.targetLevel = 0;
-    sig.strength = 0;
-    sig.time = 0;
-    sig.reason = "";
-}
-
-void ResetTargetMap(TargetMap& targets)
-{
-    targets.entry = 0;
-    targets.slInitial = 0;
-    targets.slCurrent = 0;
-    targets.tp1 = 0;
-    targets.tp2 = 0;
-    targets.tp3 = 0;
-    targets.trailLevel = 0;
-    targets.activeTarget = 0;
-}
-
-void ResetTradePlan(TradePlan& plan)
-{
-    plan.planType = PLAN_NONE;
-    plan.cmd = 6;
-    plan.direction = DIR_NONE;
-    plan.confidence = 0;
-    ResetSignalEvent(plan.triggerSignal);
-    ResetSignalEvent(plan.invalidationSignal);
-    ResetSignalEvent(plan.targetSignal);
-    ResetSignalEvent(plan.managementSignal);
-    ResetTargetMap(plan.targets);
-}
-
 void ResetOrder(MyOrder& o)
 {
     o.ticketNr = -1;
@@ -3598,31 +3337,4 @@ void ModifyTP(int cmd, MyOrder& TargetOrder)
         }
     }
 
-}
-
-void DeleteInvalidPendingOrders()
-{
-    if(pending_buy_limit.ticketNr > -1 && !PendingSignalStillValid(OP_BUYLIMIT)){
-        Print("Deleting stale OP_BUYLIMIT: pending signal is no longer valid");
-        ModifyTP(DELETE_PENDING, pending_buy_limit);
-        ResetOrder(pending_buy_limit);
-    }
-
-    if(pending_buy_stop.ticketNr > -1 && !PendingSignalStillValid(OP_BUYSTOP)){
-        Print("Deleting stale OP_BUYSTOP: pending signal is no longer valid");
-        ModifyTP(DELETE_PENDING, pending_buy_stop);
-        ResetOrder(pending_buy_stop);
-    }
-
-    if(pending_sell_limit.ticketNr > -1 && !PendingSignalStillValid(OP_SELLLIMIT)){
-        Print("Deleting stale OP_SELLLIMIT: pending signal is no longer valid");
-        ModifyTP(DELETE_PENDING, pending_sell_limit);
-        ResetOrder(pending_sell_limit);
-    }
-
-    if(pending_sell_stop.ticketNr > -1 && !PendingSignalStillValid(OP_SELLSTOP)){
-        Print("Deleting stale OP_SELLSTOP: pending signal is no longer valid");
-        ModifyTP(DELETE_PENDING, pending_sell_stop);
-        ResetOrder(pending_sell_stop);
-    }
 }
