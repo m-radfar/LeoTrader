@@ -1144,6 +1144,18 @@ void BuildTFRelation(LeoSensors& smallSig, LeoSensors& bigSig, TFRelation& rel)
         rel.buy_stop.openPrice = fastStop;
         if(rel.buy_stop.openPrice <= 0)
             rel.buy_stop.openPrice = stableStop;
+        double buyStopSL = 0;
+        if(rel.buy_stop.openPrice > 0){
+            buyStopSL = buyStopUsesCandelSource
+                        ? NextFiboBelowIn(smallSig.fibo_candel[0], rel.buy_stop.openPrice)
+                        : (buyStopUsesFastSource
+                           ? NextFiboBelowIn(smallSig.fibo_zig_sensitive[0], rel.buy_stop.openPrice)
+                           : NextFiboBelowIn(smallSig.fibo_zig[0], rel.buy_stop.openPrice));
+            if(buyStopSL <= 0 && buyStopUsesFastSource)
+                buyStopSL = NextFiboBelowIn(smallSig.fibo_candel[0], rel.buy_stop.openPrice);
+            if(buyStopSL <= 0)
+                buyStopSL = NextFiboBelow(rel.buy_stop.openPrice);
+        }
         if(buyTarget <= 0)
             buyTarget = buyStopUsesFastSource
                         ? NextFiboAboveIn(smallSig.fibo_zig_sensitive[0], rel.buy_stop.openPrice)
@@ -1199,11 +1211,11 @@ void BuildTFRelation(LeoSensors& smallSig, LeoSensors& bigSig, TFRelation& rel)
         if(smallSig.exhaustionSell) rel.continuationScore += 12;
         if(smallSig.StoBuy) rel.continuationScore += 8;
 
-        // Complete buy-stop candidate with SL below the zone/support and TP above entry.
+        // Complete buy-stop candidate with SL below its own trigger and TP above entry.
         if(rel.buy_stop.openPrice > 0){
-            rel.buy_stop.StopLoss = buyLimitSL;
+            rel.buy_stop.StopLoss = buyStopSL;
             if(rel.buy_stop.StopLoss <= 0)
-                rel.buy_stop.StopLoss = rel.bigLimitDown-smallSig.atr[0];
+                rel.buy_stop.StopLoss = rel.buy_stop.openPrice-smallSig.atr[0];
             rel.buy_stop.TakeProfit = buyTarget;
             if(rel.buy_stop.TakeProfit <= 0)
                 rel.buy_stop.TakeProfit = bigSig.posFibo_zig[0].fibo_resistance;
@@ -1272,6 +1284,18 @@ void BuildTFRelation(LeoSensors& smallSig, LeoSensors& bigSig, TFRelation& rel)
         rel.sell_stop.openPrice = fastStop;
         if(rel.sell_stop.openPrice <= 0)
             rel.sell_stop.openPrice = stableStop;
+        double sellStopSL = 0;
+        if(rel.sell_stop.openPrice > 0){
+            sellStopSL = sellStopUsesCandelSource
+                         ? NextFiboAboveIn(smallSig.fibo_candel[0], rel.sell_stop.openPrice)
+                         : (sellStopUsesFastSource
+                            ? NextFiboAboveIn(smallSig.fibo_zig_sensitive[0], rel.sell_stop.openPrice)
+                            : NextFiboAboveIn(smallSig.fibo_zig[0], rel.sell_stop.openPrice));
+            if(sellStopSL <= 0 && sellStopUsesFastSource)
+                sellStopSL = NextFiboAboveIn(smallSig.fibo_candel[0], rel.sell_stop.openPrice);
+            if(sellStopSL <= 0)
+                sellStopSL = NextFiboAbove(rel.sell_stop.openPrice);
+        }
         if(sellTarget <= 0)
             sellTarget = sellStopUsesFastSource
                          ? NextFiboBelowIn(smallSig.fibo_zig_sensitive[0], rel.sell_stop.openPrice)
@@ -1326,11 +1350,11 @@ void BuildTFRelation(LeoSensors& smallSig, LeoSensors& bigSig, TFRelation& rel)
         if(smallSig.exhaustionBuy) rel.continuationScore += 12;
         if(smallSig.StoSell) rel.continuationScore += 8;
 
-        // Complete sell-stop candidate with SL above the zone/resistance and TP below entry.
+        // Complete sell-stop candidate with SL above its own trigger and TP below entry.
         if(rel.sell_stop.openPrice > 0){
-            rel.sell_stop.StopLoss = sellLimitSL;
+            rel.sell_stop.StopLoss = sellStopSL;
             if(rel.sell_stop.StopLoss <= 0)
-                rel.sell_stop.StopLoss = rel.bigLimitTop+smallSig.atr[0];
+                rel.sell_stop.StopLoss = rel.sell_stop.openPrice+smallSig.atr[0];
             rel.sell_stop.TakeProfit = sellTarget;
             if(rel.sell_stop.TakeProfit <= 0)
                 rel.sell_stop.TakeProfit = bigSig.posFibo_zig[0].fibo_support;
@@ -1362,6 +1386,13 @@ void BuildTFRelation(LeoSensors& smallSig, LeoSensors& bigSig, TFRelation& rel)
     // Clamp scores consumed later by candidate selection.
     rel.reversalRiskScore = ClampDouble(rel.reversalRiskScore, 0, 100);
     rel.continuationScore = ClampDouble(rel.continuationScore, 0, 100);
+
+    NormalizeOrderPrices(rel.buy_limit);
+    NormalizeOrderPrices(rel.buy_stop);
+    NormalizeOrderPrices(rel.break_out_sell_stop);
+    NormalizeOrderPrices(rel.sell_limit);
+    NormalizeOrderPrices(rel.sell_stop);
+    NormalizeOrderPrices(rel.break_out_buy_stop);
 }
 
 void updateSensors()
@@ -1481,6 +1512,44 @@ void BestDirectionalScores(double& buyScore, double& sellScore)
     AccumulateDirectionalScores(rel_M5_M15, buyScore, sellScore);
 }
 
+int ProfitCandles(int direction, int timeframe, int count)
+{
+    int result = 0;
+    for(int i=1; i<=count; i++){
+        double open = iOpen(Symbol(), timeframe, i);
+        double close = iClose(Symbol(), timeframe, i);
+        if(direction == OP_BUY && close > open)
+            result++;
+        else if(direction == OP_SELL && close < open)
+            result++;
+    }
+    return result;
+}
+
+double FiboProtectLevel(int direction, double price, int levelsBack)
+{
+    int passed = 0;
+    if(direction == OP_BUY){
+        for(int i=ArraySize(all_fibos)-1; i>=0; i--){
+            if(all_fibos[i] > 0 && all_fibos[i] < price-minMove){
+                passed++;
+                if(passed >= levelsBack)
+                    return all_fibos[i];
+            }
+        }
+    }
+    else if(direction == OP_SELL){
+        for(int j=0; j<ArraySize(all_fibos); j++){
+            if(all_fibos[j] > price+minMove){
+                passed++;
+                if(passed >= levelsBack)
+                    return all_fibos[j];
+            }
+        }
+    }
+    return 0;
+}
+
 void checkClose()
 {  
     if (aktiveRobotOrder.type!=6){
@@ -1512,6 +1581,27 @@ void checkClose()
                 double buyBreakEvenSL = aktiveRobotOrder.openPrice+MathMax(spread, minMove);
                 if(buyBreakEvenSL > aktiveRobotOrder.StopLoss+minMove && buyBreakEvenSL < Bid-minStopLevel){
                     aktiveRobotOrder.StopLoss = buyBreakEvenSL;
+                    ModifyTP(OP_BUY, aktiveRobotOrder);
+                }
+            }
+
+            bool buyProfitRunExhausted = (buyProfit >= buyProtectTrigger
+                                          && (ProfitCandles(OP_BUY, PERIOD_M5, 3) >= 2 || ProfitCandles(OP_BUY, PERIOD_M15, 2) >= 1)
+                                          && (LS_M5.exhaustionBuy
+                                              || LS_M15.exhaustionBuy
+                                              || LS_M5.StoSell
+                                              || LS_M5.rsi[0] < LS_M5.rsi[1]
+                                              || LS_M5.macd_main[0] < LS_M5.macd_main[1]));
+            if(buyProfitRunExhausted){
+                double buyProtectSL = FiboProtectLevel(OP_BUY, Bid, 3);
+                if(buyProtectSL <= aktiveRobotOrder.openPrice)
+                    buyProtectSL = FiboProtectLevel(OP_BUY, Bid, 2);
+                if(buyProtectSL <= aktiveRobotOrder.openPrice)
+                    buyProtectSL = Bid-MathMax(LS_M5.atr[0]*0.45, minStopLevel*2);
+                if(buyProtectSL > aktiveRobotOrder.openPrice
+                   && buyProtectSL > aktiveRobotOrder.StopLoss+minMove
+                   && buyProtectSL < Bid-minStopLevel){
+                    aktiveRobotOrder.StopLoss = buyProtectSL;
                     ModifyTP(OP_BUY, aktiveRobotOrder);
                 }
             }
@@ -1562,6 +1652,27 @@ void checkClose()
                 if((aktiveRobotOrder.StopLoss <= 0 || sellBreakEvenSL < aktiveRobotOrder.StopLoss-minMove)
                    && sellBreakEvenSL > Ask+minStopLevel){
                     aktiveRobotOrder.StopLoss = sellBreakEvenSL;
+                    ModifyTP(OP_SELL, aktiveRobotOrder);
+                }
+            }
+
+            bool sellProfitRunExhausted = (sellProfit >= sellProtectTrigger
+                                           && (ProfitCandles(OP_SELL, PERIOD_M5, 3) >= 2 || ProfitCandles(OP_SELL, PERIOD_M15, 2) >= 1)
+                                           && (LS_M5.exhaustionSell
+                                               || LS_M15.exhaustionSell
+                                               || LS_M5.StoBuy
+                                               || LS_M5.rsi[0] > LS_M5.rsi[1]
+                                               || LS_M5.macd_main[0] > LS_M5.macd_main[1]));
+            if(sellProfitRunExhausted){
+                double sellProtectSL = FiboProtectLevel(OP_SELL, Ask, 3);
+                if(sellProtectSL >= aktiveRobotOrder.openPrice || sellProtectSL <= 0)
+                    sellProtectSL = FiboProtectLevel(OP_SELL, Ask, 2);
+                if(sellProtectSL >= aktiveRobotOrder.openPrice || sellProtectSL <= 0)
+                    sellProtectSL = Ask+MathMax(LS_M5.atr[0]*0.45, minStopLevel*2);
+                if(sellProtectSL > Ask+minStopLevel
+                   && sellProtectSL < aktiveRobotOrder.openPrice
+                   && (aktiveRobotOrder.StopLoss <= 0 || sellProtectSL < aktiveRobotOrder.StopLoss-minMove)){
+                    aktiveRobotOrder.StopLoss = sellProtectSL;
                     ModifyTP(OP_SELL, aktiveRobotOrder);
                 }
             }
@@ -1647,6 +1758,16 @@ void SetPendingPlan(MyOrder& target, int type, double lotsValue, double entry, d
     target.openPrice = entry;
     target.StopLoss = sl;
     target.TakeProfit = tp;
+}
+
+void NormalizeOrderPrices(MyOrder& order)
+{
+    if(order.openPrice > 0)
+        order.openPrice = NormalizeDouble(order.openPrice, vdigits);
+    if(order.StopLoss > 0)
+        order.StopLoss = NormalizeDouble(order.StopLoss, vdigits);
+    if(order.TakeProfit > 0)
+        order.TakeProfit = NormalizeDouble(order.TakeProfit, vdigits);
 }
 
 double FiboSLBetween(int orderType, double entry, double localSL, double bigSL)
@@ -1907,7 +2028,9 @@ void getCMD()
 
     if(!buyStopReady && buyLimitReady && buyLimitTP > 0){
         buyStopEntry = buyLimitTP;
-        buyStopSL = buyLimitSL;
+        buyStopSL = NextFiboBelow(buyStopEntry);
+        if(buyStopSL <= 0 || buyStopSL >= buyStopEntry)
+            buyStopSL = buyStopEntry-MathMax(minStopLevel*2, minMove*3);
         buyStopTP = NextFiboAbove(buyStopEntry);
         if(buyStopTP <= 0)
             buyStopTP = buyStopEntry+MathMax(minStopLevel*2, minMove*3);
@@ -1916,7 +2039,9 @@ void getCMD()
     }
     if(!buyStopReady && pending_buy_limit.lots > 0 && pending_buy_limit.TakeProfit > 0){
         buyStopEntry = pending_buy_limit.TakeProfit;
-        buyStopSL = pending_buy_limit.StopLoss;
+        buyStopSL = NextFiboBelow(buyStopEntry);
+        if(buyStopSL <= 0 || buyStopSL >= buyStopEntry)
+            buyStopSL = buyStopEntry-MathMax(minStopLevel*2, minMove*3);
         buyStopTP = NextFiboAbove(buyStopEntry);
         if(buyStopTP <= 0)
             buyStopTP = buyStopEntry+MathMax(minStopLevel*2, minMove*3);
@@ -1925,7 +2050,9 @@ void getCMD()
     }
     if(!sellStopReady && sellLimitReady && sellLimitTP > 0){
         sellStopEntry = sellLimitTP;
-        sellStopSL = sellLimitSL;
+        sellStopSL = NextFiboAbove(sellStopEntry);
+        if(sellStopSL <= 0 || sellStopSL <= sellStopEntry)
+            sellStopSL = sellStopEntry+MathMax(minStopLevel*2, minMove*3);
         sellStopTP = NextFiboBelow(sellStopEntry);
         if(sellStopTP <= 0)
             sellStopTP = sellStopEntry-MathMax(minStopLevel*2, minMove*3);
@@ -1934,7 +2061,9 @@ void getCMD()
     }
     if(!sellStopReady && pending_sell_limit.lots > 0 && pending_sell_limit.TakeProfit > 0){
         sellStopEntry = pending_sell_limit.TakeProfit;
-        sellStopSL = pending_sell_limit.StopLoss;
+        sellStopSL = NextFiboAbove(sellStopEntry);
+        if(sellStopSL <= 0 || sellStopSL <= sellStopEntry)
+            sellStopSL = sellStopEntry+MathMax(minStopLevel*2, minMove*3);
         sellStopTP = NextFiboBelow(sellStopEntry);
         if(sellStopTP <= 0)
             sellStopTP = sellStopEntry-MathMax(minStopLevel*2, minMove*3);
