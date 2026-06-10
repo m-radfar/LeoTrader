@@ -1860,20 +1860,19 @@ void ConsiderPendingPlanByType(TFRelation& rel, int orderType, int& bestType, do
     if(entry <= 0 || sl <= 0 || tp <= 0)
         return;
 
-    double bigSL=0;
     if(orderType == OP_BUYSTOP || orderType == OP_BUYLIMIT){
-        if(rel.bigLimitDown > 0)
-            bigSL = NextFiboBelow(rel.bigLimitDown);
-        if(bigSL <= 0 && rel.bigLimitDown > 0)
-            bigSL = rel.bigLimitDown-MathMax(minStopLevel*2, minMove*3);
-        sl = FiboSLBetween(orderType, entry, sl, bigSL);
+        double maxBuySL = entry-MathMax(minStopLevel*2, minMove*3);
+        if(sl <= 0 || sl >= maxBuySL)
+            sl = NextFiboBelow(maxBuySL);
+        if(sl <= 0 || sl >= maxBuySL)
+            sl = maxBuySL;
     }
     else if(orderType == OP_SELLSTOP || orderType == OP_SELLLIMIT){
-        if(rel.bigLimitTop > 0)
-            bigSL = NextFiboAbove(rel.bigLimitTop);
-        if(bigSL <= 0 && rel.bigLimitTop > 0)
-            bigSL = rel.bigLimitTop+MathMax(minStopLevel*2, minMove*3);
-        sl = FiboSLBetween(orderType, entry, sl, bigSL);
+        double minSellSL = entry+MathMax(minStopLevel*2, minMove*3);
+        if(sl <= 0 || sl <= minSellSL)
+            sl = NextFiboAbove(minSellSL);
+        if(sl <= 0 || sl <= minSellSL)
+            sl = minSellSL;
     }
 
     if(sl <= 0)
