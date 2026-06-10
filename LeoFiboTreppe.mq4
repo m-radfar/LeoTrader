@@ -2126,6 +2126,7 @@ void getCMD()
         SetPendingPlan(newPending_sell_limit, OP_SELLLIMIT, lots, sellLimitEntry, sellLimitSL, sellLimitTP);
     if(allowSell && sellStopReady)
         SetPendingPlan(newPending_sell_stop, OP_SELLSTOP, lots, sellStopEntry, sellStopSL, sellStopTP);
+        
     checkPendingOrdersChange(pending_buy_limit, newPending_buy_limit);
     checkPendingOrdersChange(pending_sell_limit, newPending_sell_limit);
     checkPendingOrdersChange(pending_buy_stop, newPending_buy_stop);
@@ -2150,8 +2151,11 @@ void checkPendingOrdersChange(MyOrder& pendingOrder, MyOrder& newPendingOrder)
     if(pendingOrder.ticketNr > -1 && pendingOrder.type == newPendingOrder.type){
         int oldTicket = pendingOrder.ticketNr;
         double oldLots = pendingOrder.lots;
-        if(!PendingEntryIsBetter(newPendingOrder.type, pendingOrder.openPrice, newPendingOrder.openPrice))
+        if(!PendingEntryIsBetter(newPendingOrder.type, pendingOrder.openPrice, newPendingOrder.openPrice)){
             newPendingOrder.openPrice = pendingOrder.openPrice;
+            newPendingOrder.StopLoss = pendingOrder.StopLoss;
+            newPendingOrder.TakeProfit = pendingOrder.TakeProfit;
+        }
         if(MathAbs(newPendingOrder.openPrice-pendingOrder.openPrice) < minMove
            && MathAbs(newPendingOrder.StopLoss-pendingOrder.StopLoss) < minMove
            && MathAbs(newPendingOrder.TakeProfit-pendingOrder.TakeProfit) < minMove)
